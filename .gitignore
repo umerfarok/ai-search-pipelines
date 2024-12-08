@@ -2,3 +2,6 @@ node_modules
 __pycache__
 models
 data
+playground/.next
+playground/node_modules
+playground/.next
