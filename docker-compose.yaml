@@ -1,0 +1,73 @@
+# docker-compose.yml
+version: '3.8'
+
+x-common-python-service: &python-service-common
+  build:
+    context: ./trainer
+    dockerfile: Dockerfile.python
+  restart: unless-stopped
+  environment:
+    - PYTHONUNBUFFERED=1
+    - PYTHONPATH=/app
+  volumes:
+    - shared_data:/app/data:rw
+    - shared_models:/app/models:rw
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+    interval: 30s
+    timeout: 10s
+    retries: 3
+
+services:
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      - MONGO_URI=mongodb://root:example@mongo:27017
+      - SEARCH_SERVICE_HOST=http://search-service:5000
+      - TRAINING_SERVICE_HOST=http://training-service:5001
+    volumes:
+      - shared_data:/app/data:rw
+      - shared_models:/app/models:rw
+    depends_on:
+      - mongo
+      - search-service
+      - training-service
+
+  search-service:
+    <<: *python-service-common
+    ports:
+      - "5000:5000"
+    environment:
+      - SEARCH_SERVICE_PORT=5000
+      - BATCH_SIZE=128
+      - NUM_WORKERS=4
+      - USE_FP16=true
+      - CHUNK_SIZE=10000
+    command: ["python", "search_service.py"]
+
+  training-service:
+    <<: *python-service-common
+    ports:
+      - "5001:5001"
+    environment:
+      - TRAINING_SERVICE_PORT=5001
+    command: ["python", "training_service.py"]
+
+  mongo:
+    image: mongo:latest
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: example
+    volumes:
+      - mongodb_data:/data/db
+
+volumes:
+  mongodb_data:
+  shared_data:
+  shared_models:

@@ -1,0 +1,70 @@
+# syntax=docker/dockerfile:1
+
+# Build arguments
+ARG PYTHON_VERSION=3.9
+ARG BUILD_TYPE=cpu
+
+# Base stage for common setup
+FROM python:${PYTHON_VERSION}-slim AS base
+
+# Set build arguments for subsequent stages
+ARG BUILD_TYPE
+ENV BUILD_TYPE=${BUILD_TYPE}
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    git \
+    libopenblas-dev \
+    liblapack-dev \
+    gfortran \
+    pkg-config \
+    python3-dev \
+    python3-setuptools \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set up directories
+WORKDIR /app
+RUN mkdir -p /app/models /app/data && \
+    chmod 777 /app/models /app/data
+
+# Copy requirements first
+COPY requirements.txt .
+
+# CPU variant
+FROM base AS cpu
+RUN pip install --no-cache-dir \
+    torch==2.0.0+cpu \
+    numpy==1.24.3 \
+    scipy==1.10.1 \
+    pandas==2.0.2 \
+    torchvision==0.15.0+cpu \
+    -f https://download.pytorch.org/whl/torch_stable.html \
+    && pip install --no-cache-dir -r requirements.txt
+
+# GPU variant
+FROM base AS gpu
+RUN pip install --no-cache-dir \
+    torch==2.0.0+cu118 \
+    torchvision==0.15.0+cu118 \
+    numpy==1.24.3 \
+    scipy==1.10.1 \
+    pandas==2.0.2 \
+    -f https://download.pytorch.org/whl/torch_stable.html \
+    && pip install --no-cache-dir -r requirements.txt
+
+# Final stage
+FROM ${BUILD_TYPE} AS final
+
+# Copy application code
+COPY . .
+
+CMD ["python3", "search_service.py"]
