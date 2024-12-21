@@ -11,7 +11,66 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
+
+func GetModelVersions(db *mongo.Database) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		opts := options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}})
+
+		filter := bson.M{}
+		if configID := c.Query("config_id"); configID != "" {
+			objectID, err := primitive.ObjectIDFromHex(configID)
+			if err != nil {
+				c.JSON(400, gin.H{"error": "invalid config_id format"})
+				return
+			}
+			filter["config_id"] = objectID
+		}
+
+		cursor, err := db.Collection("model_versions").Find(context.Background(), filter, opts)
+		if err != nil {
+			c.JSON(500, gin.H{"error": "failed to fetch model versions"})
+			return
+		}
+		defer cursor.Close(context.Background())
+
+		var versions []config.ModelVersion
+		if err := cursor.All(context.Background(), &versions); err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(200, versions)
+	}
+}
+
+func GetModelVersion(db *mongo.Database) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id, err := primitive.ObjectIDFromHex(c.Param("id"))
+		if err != nil {
+			c.JSON(400, gin.H{"error": "invalid id format"})
+			return
+		}
+
+		var version config.ModelVersion
+		err = db.Collection("model_versions").FindOne(
+			context.Background(),
+			bson.M{"_id": id},
+		).Decode(&version)
+
+		if err != nil {
+			if err == mongo.ErrNoDocuments {
+				c.JSON(404, gin.H{"error": "model version not found"})
+				return
+			}
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(200, version)
+	}
+}
 
 func CreateConfig(db *mongo.Database) gin.HandlerFunc {
 	return func(c *gin.Context) {

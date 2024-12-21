@@ -1,75 +1,92 @@
-// api/handlers/model.go
+// api/handlers/training.go
 
 package handlers
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
-	"net/http"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/umerfarok/product-search/config"
+	"github.com/redis/go-redis/v9"
+	typCgf "github.com/umerfarok/product-search/config"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+)
+
+const (
+	trainingQueue     = "training_queue"
+	modelStatusPrefix = "model_status:"
+	statusTTL         = 24 * time.Hour
 )
 
 type TrainingService struct {
-	db           *mongo.Database
-	trainingHost string
+	db    *mongo.Database
+	redis *redis.Client
+}
+
+type TrainingRequest struct {
+	ConfigID string `json:"config_id" binding:"required"`
+}
+
+type TrainingStatus struct {
+	Status    string    `json:"status"`
+	Progress  float64   `json:"progress,omitempty"`
+	Error     string    `json:"error,omitempty"`
+	StartTime time.Time `json:"start_time,omitempty"`
+	EndTime   time.Time `json:"end_time,omitempty"`
 }
 
 func NewTrainingService(db *mongo.Database) *TrainingService {
-	trainingHost := os.Getenv("TRAINING_SERVICE_HOST")
-	if trainingHost == "" {
-		trainingHost = "http://localhost:5001"
-	}
+	redisHost := getEnv("REDIS_HOST", "localhost")
+	redisPort := getEnv("REDIS_PORT", "6379")
+
+	rdb := redis.NewClient(&redis.Options{
+		Addr: fmt.Sprintf("%s:%s", redisHost, redisPort),
+		DB:   0,
+	})
 
 	return &TrainingService{
-		db:           db,
-		trainingHost: trainingHost,
+		db:    db,
+		redis: rdb,
 	}
 }
 
 func (s *TrainingService) TriggerTraining(c *gin.Context) {
-	var req struct {
-		ConfigID string `json:"config_id"`
-	}
-	if err := c.BindJSON(&req); err != nil {
-		c.JSON(400, gin.H{"error": "config_id is required"})
+	var req TrainingRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
 
+	// Validate config exists
 	configID, err := primitive.ObjectIDFromHex(req.ConfigID)
 	if err != nil {
-		c.JSON(400, gin.H{"error": "invalid config_id format"})
+		c.JSON(400, gin.H{"error": "invalid config_id"})
 		return
 	}
 
-	var cfg config.ProductConfig
-	if err := s.db.Collection("configs").FindOne(context.Background(), bson.M{"_id": configID}).Decode(&cfg); err != nil {
+	var config typCgf.ProductConfig
+	if err := s.db.Collection("configs").FindOne(context.Background(), bson.M{"_id": configID}).Decode(&config); err != nil {
 		if err == mongo.ErrNoDocuments {
 			c.JSON(404, gin.H{"error": "configuration not found"})
 			return
 		}
-		c.JSON(500, gin.H{"error": "failed to fetch configuration"})
+		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
 
 	// Create model version
-	version := config.ModelVersion{
+	version := typCgf.ModelVersion{
 		ID:        primitive.NewObjectID(),
 		ConfigID:  configID,
 		Version:   time.Now().Format("20060102150405"),
-		Status:    "training",
-		CreatedAt: time.Now().UTC(),
+		Status:    "queued",
+		CreatedAt: time.Now(),
 	}
 
 	if _, err := s.db.Collection("model_versions").InsertOne(context.Background(), version); err != nil {
@@ -77,168 +94,137 @@ func (s *TrainingService) TriggerTraining(c *gin.Context) {
 		return
 	}
 
-	// Create output directory
-	outputDir := filepath.Join("models", version.Version)
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		s.updateModelStatus(version.ID, "failed", fmt.Sprintf("failed to create output directory: %v", err))
-		c.JSON(500, gin.H{"error": "failed to create output directory"})
+	// Prepare training job
+	trainingJob := map[string]interface{}{
+		"version_id":  version.ID.Hex(),
+		"config_id":   req.ConfigID,
+		"config":      config,
+		"output_path": filepath.Join("./models", version.Version),
+		"create_time": time.Now(),
+	}
+
+	// Add to Redis queue
+	jobBytes, err := json.Marshal(trainingJob)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "failed to serialize training job"})
 		return
 	}
 
-	// Start training asynchronously
-	go s.runTraining(cfg, version, outputDir)
+	if err := s.redis.LPush(context.Background(), trainingQueue, jobBytes).Err(); err != nil {
+		c.JSON(500, gin.H{"error": "failed to queue training job"})
+		return
+	}
+
+	// Set initial status
+	status := TrainingStatus{
+		Status:    "queued",
+		StartTime: time.Now(),
+	}
+	statusKey := fmt.Sprintf("%s%s", modelStatusPrefix, version.ID.Hex())
+	statusBytes, _ := json.Marshal(status)
+	s.redis.Set(context.Background(), statusKey, statusBytes, statusTTL)
 
 	c.JSON(202, version)
 }
 
-func (s *TrainingService) runTraining(cfg config.ProductConfig, version config.ModelVersion, outputDir string) {
-	requestBody := map[string]interface{}{
-		"training_id": version.ID.Hex(),
-		"config":      cfg,
-		"output_dir":  outputDir,
-	}
-
-	jsonBody, err := json.Marshal(requestBody)
-	if err != nil {
-		s.updateModelStatus(version.ID, "failed", fmt.Sprintf("failed to marshal request: %v", err))
+func (s *TrainingService) GetStatus(c *gin.Context) {
+	versionID := c.Param("id")
+	if versionID == "" {
+		c.JSON(400, gin.H{"error": "version_id is required"})
 		return
 	}
 
-	resp, err := http.Post(fmt.Sprintf("%s/train", s.trainingHost), "application/json", bytes.NewBuffer(jsonBody))
-	if err != nil {
-		s.updateModelStatus(version.ID, "failed", fmt.Sprintf("failed to start training: %v", err))
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := ioutil.ReadAll(resp.Body)
-		s.updateModelStatus(version.ID, "failed", fmt.Sprintf("training service error: %s", string(body)))
-		return
-	}
-
-	// Monitor training status
-	s.monitorTraining(version.ID)
-}
-
-func (s *TrainingService) monitorTraining(versionID primitive.ObjectID) {
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-
-	maxAttempts := 360 // 1 hour maximum (10 seconds * 360)
-	attempts := 0
-
-	for {
-		select {
-		case <-ticker.C:
-			attempts++
-			if attempts > maxAttempts {
-				s.updateModelStatus(versionID, "failed", "training timeout exceeded")
-				return
-			}
-
-			status, err := s.checkTrainingStatus(versionID)
-			if err != nil {
-				s.updateModelStatus(versionID, "failed", fmt.Sprintf("failed to check training status: %v", err))
-				return
-			}
-
-			switch status["status"] {
-			case "completed":
-				s.updateModelStatus(versionID, "completed", "")
-				return
-			case "failed":
-				s.updateModelStatus(versionID, "failed", status["error"].(string))
-				return
-			}
+	// Check Redis status first
+	statusKey := fmt.Sprintf("%s%s", modelStatusPrefix, versionID)
+	statusData, err := s.redis.Get(context.Background(), statusKey).Bytes()
+	if err == nil {
+		var status TrainingStatus
+		if err := json.Unmarshal(statusData, &status); err == nil {
+			c.JSON(200, status)
+			return
 		}
 	}
-}
 
-func (s *TrainingService) checkTrainingStatus(versionID primitive.ObjectID) (map[string]interface{}, error) {
-	resp, err := http.Get(fmt.Sprintf("%s/training-status/%s", s.trainingHost, versionID.Hex()))
+	// Fall back to database status
+	id, err := primitive.ObjectIDFromHex(versionID)
 	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var status map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-		return nil, err
+		c.JSON(400, gin.H{"error": "invalid version_id format"})
+		return
 	}
 
-	return status, nil
-}
-
-func (s *TrainingService) updateModelStatus(versionID primitive.ObjectID, status string, errorMsg string) {
-	update := bson.M{
-		"$set": bson.M{
-			"status": status,
-			"error":  errorMsg,
-		},
-	}
-
-	s.db.Collection("model_versions").UpdateOne(
+	var version typCgf.ModelVersion
+	err = s.db.Collection("model_versions").FindOne(
 		context.Background(),
-		bson.M{"_id": versionID},
-		update,
-	)
-}
+		bson.M{"_id": id},
+	).Decode(&version)
 
-func GetModelVersions(db *mongo.Database) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		opts := options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}})
-
-		filter := bson.M{}
-		if configID := c.Query("config_id"); configID != "" {
-			objectID, err := primitive.ObjectIDFromHex(configID)
-			if err != nil {
-				c.JSON(400, gin.H{"error": "invalid config_id format"})
-				return
-			}
-			filter["config_id"] = objectID
-		}
-
-		cursor, err := db.Collection("model_versions").Find(context.Background(), filter, opts)
-		if err != nil {
-			c.JSON(500, gin.H{"error": "failed to fetch model versions"})
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			c.JSON(404, gin.H{"error": "model version not found"})
 			return
 		}
-		defer cursor.Close(context.Background())
-
-		var versions []config.ModelVersion
-		if err := cursor.All(context.Background(), &versions); err != nil {
-			c.JSON(500, gin.H{"error": err.Error()})
-			return
-		}
-
-		c.JSON(200, versions)
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
 	}
+
+	status := TrainingStatus{
+		Status: version.Status,
+		Error:  version.Error,
+	}
+
+	c.JSON(200, status)
 }
 
-func GetModelVersion(db *mongo.Database) gin.HandlerFunc {
+func getEnv(key, fallback string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+	return fallback
+}
+
+func UpdateModelVersionStatus(db *mongo.Database) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		id, err := primitive.ObjectIDFromHex(c.Param("id"))
+		versionID, err := primitive.ObjectIDFromHex(c.Param("id"))
 		if err != nil {
-			c.JSON(400, gin.H{"error": "invalid id format"})
+			c.JSON(400, gin.H{"error": "invalid version id"})
 			return
 		}
 
-		var version config.ModelVersion
-		err = db.Collection("model_versions").FindOne(
+		var updateReq struct {
+			Status    string `json:"status" binding:"required"`
+			Error     string `json:"error,omitempty"`
+			UpdatedAt string `json:"updated_at"`
+		}
+
+		if err := c.ShouldBindJSON(&updateReq); err != nil {
+			c.JSON(400, gin.H{"error": err.Error()})
+			return
+		}
+
+		update := bson.M{
+			"$set": bson.M{
+				"status":     updateReq.Status,
+				"error":      updateReq.Error,
+				"updated_at": updateReq.UpdatedAt,
+			},
+		}
+
+		result, err := db.Collection("model_versions").UpdateOne(
 			context.Background(),
-			bson.M{"_id": id},
-		).Decode(&version)
+			bson.M{"_id": versionID},
+			update,
+		)
 
 		if err != nil {
-			if err == mongo.ErrNoDocuments {
-				c.JSON(404, gin.H{"error": "model version not found"})
-				return
-			}
-			c.JSON(500, gin.H{"error": err.Error()})
+			c.JSON(500, gin.H{"error": "failed to update version"})
 			return
 		}
 
-		c.JSON(200, version)
+		if result.MatchedCount == 0 {
+			c.JSON(404, gin.H{"error": "version not found"})
+			return
+		}
+
+		c.JSON(200, gin.H{"status": "updated"})
 	}
 }
