@@ -447,7 +447,7 @@ const SearchBox = ({
                 onChange={(e) => setSelectedVersion(e.target.value)}
             >
                 <option value="latest">Latest Model</option>
-                {modelVersions.map((version) => (
+                {modelVersions?.map((version) => (
                     <option key={version.id} value={version.id}>
                         {version.version} ({version.status})
                     </option>
