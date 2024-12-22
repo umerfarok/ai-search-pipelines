@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/umerfarok/product-search/handlers"
 	"go.mongodb.org/mongo-driver/bson"
@@ -45,6 +46,14 @@ func main() {
 	trainingService := handlers.NewTrainingService(db)
 
 	r := gin.Default()
+	r.Use(cors.New(cors.Config{
+		AllowOrigins:     []string{"*"},
+		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
+		ExposeHeaders:    []string{"Content-Length"},
+		AllowCredentials: true,
+		MaxAge:           12 * time.Hour,
+	}))
 
 	// Config routes
 	r.POST("/config", handlers.CreateConfig(db))
@@ -62,6 +71,7 @@ func main() {
 
 	// Search routes
 	r.POST("/search", searchService.Search)
+	r.PUT("/model/version/:id/status", handlers.UpdateModelVersionStatus(db))
 
 	port := os.Getenv("PORT")
 	if port == "" {

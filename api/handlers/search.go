@@ -151,6 +151,7 @@ func (s *SearchService) performSearch(version config.ModelVersion, req config.Se
 	}
 
 	jsonBody, err := json.Marshal(requestBody)
+	log.Printf("Sending search request with model path: %s", modelPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %v", err)
 	}
