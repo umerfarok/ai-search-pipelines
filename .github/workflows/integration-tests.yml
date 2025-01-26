@@ -136,7 +136,7 @@ jobs:
         mkdir -p logs
         
         # Collect service logs
-        services=("api" "search-service" "training-service" "redis" "mongo" "localstack")
+        services=("api" "search-service" "training-service")
         for service in "${services[@]}"; do
           echo "=== $service Logs ===" > "logs/$service.log"
           docker compose logs "$service" >> "logs/$service.log" 2>&1
