@@ -6,7 +6,13 @@ import {
     ChevronDown,
     CheckCircle2,
     XCircle,
-    AlertCircle
+    AlertCircle,
+    Clock,
+    PlayCircle,
+    StopCircle,
+    Info,
+    ChevronLeft,
+    ChevronRight
 } from 'lucide-react';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
@@ -19,6 +25,8 @@ const useModelSearch = () => {
     const [searchResults, setSearchResults] = useState([]);
     const [searching, setSearching] = useState(false);
     const [activeFilters, setActiveFilters] = useState({});
+    const [currentPage, setCurrentPage] = useState(1);
+    const [totalPages, setTotalPages] = useState(1);
 
     useEffect(() => {
         fetchModels();
@@ -30,7 +38,7 @@ const useModelSearch = () => {
             const response = await fetch(`${API_BASE_URL}/config`);
             if (!response.ok) throw new Error('Failed to fetch models');
             const data = await response.json();
-            setModels(data.configs.filter(config => config.status === 'completed'));
+            setModels(data.configs);
         } catch (err) {
             setError(err.message);
         } finally {
@@ -38,8 +46,8 @@ const useModelSearch = () => {
         }
     };
 
-    const performSearch = async (query, filters = {}) => {
-        if (!selectedModel) return;
+    const performSearch = async (query, filters = {}, page = 1) => {
+        if (!selectedModel || selectedModel.status !== 'completed') return;
 
         setSearching(true);
         try {
@@ -50,17 +58,26 @@ const useModelSearch = () => {
                     query,
                     config_id: selectedModel._id,
                     max_items: 20,
-                    filters: filters
+                    filters: filters,
+                    page: page
                 })
             });
 
             if (!response.ok) throw new Error('Search failed');
             const data = await response.json();
             setSearchResults(data.results);
+            setTotalPages(data.total_pages || 1);
+            setCurrentPage(page);
         } catch (err) {
             setError(err.message);
         } finally {
             setSearching(false);
+        }
+    };
+
+    const handlePageChange = (newPage) => {
+        if (newPage >= 1 && newPage <= totalPages) {
+            performSearch(searchQuery, activeFilters, newPage);
         }
     };
 
@@ -74,40 +91,74 @@ const useModelSearch = () => {
         searching,
         performSearch,
         activeFilters,
-        setActiveFilters
+        setActiveFilters,
+        currentPage,
+        totalPages,
+        handlePageChange
     };
 };
 
-const ModelList = ({ models, selectedModel, onSelect }) => (
-    <div className="border rounded-lg overflow-hidden">
-        <div className="bg-gray-50 px-4 py-2 border-b">
-            <h3 className="font-semibold">Available Models</h3>
-        </div>
-        <div className="divide-y">
-            {models.map(model => (
-                <div
-                    key={model._id}
-                    onClick={() => onSelect(model)}
-                    className={`p-4 cursor-pointer hover:bg-gray-50 transition-colors ${selectedModel?._id === model._id ? 'bg-blue-50' : ''
-                        }`}
-                >
-                    <div className="flex justify-between items-center">
-                        <div>
-                            <h4 className="font-medium">{model.name}</h4>
-                            <p className="text-sm text-gray-600">{model.description}</p>
+const ModelList = ({ models, selectedModel, onSelect }) => {
+    const getStatusIcon = (status) => {
+        switch (status) {
+            case 'completed':
+                return <CheckCircle2 className="h-4 w-4 text-green-500" />;
+            case 'failed':
+                return <XCircle className="h-4 w-4 text-red-500" />;
+            case 'pending':
+                return <Clock className="h-4 w-4 text-yellow-500" />;
+            case 'processing':
+                return <PlayCircle className="h-4 w-4 text-blue-500" />;
+            case 'canceled':
+                return <StopCircle className="h-4 w-4 text-gray-500" />;
+            default:
+                return <Info className="h-4 w-4 text-gray-500" />;
+        }
+    };
+
+    return (
+        <div className="border rounded-lg overflow-hidden">
+            <div className="bg-gray-50 px-4 py-2 border-b">
+                <h3 className="font-semibold">Available Models</h3>
+            </div>
+            <div className="divide-y">
+                {models.map(model => (
+                    <div
+                        key={model._id}
+                        onClick={() => onSelect(model)}
+                        className={`p-4 cursor-pointer hover:bg-gray-50 transition-colors ${selectedModel?._id === model._id ? 'bg-blue-50' : ''
+                            } ${model.status !== 'completed' ? 'opacity-50 cursor-not-allowed' : ''
+                            }`}
+                        title={model.status !== 'completed' ? 'Only completed models can be used for searching' : ''}
+                    >
+                        <div className="flex justify-between items-center">
+                            <div>
+                                <h4 className="font-medium">{model.name}</h4>
+                                <p className="text-sm text-gray-600">{model.description}</p>
+                            </div>
+                            {selectedModel?._id === model._id && (
+                                <CheckCircle2 className="h-5 w-5 text-blue-500" />
+                            )}
                         </div>
-                        {selectedModel?._id === model._id && (
-                            <CheckCircle2 className="h-5 w-5 text-blue-500" />
-                        )}
+                        <div className="text-xs text-gray-500 mt-2">
+                            Created: {new Date(model.created_at).toLocaleString()}
+                        </div>
+                        <div className="flex items-center gap-2 mt-2">
+                            {getStatusIcon(model.status)}
+                            <span className="text-sm text-gray-600">{model.status}</span>
+                        </div>
+                        <div className="text-xs text-gray-500 mt-2">
+                            Version: {model.version}
+                        </div>
+                        <div className="text-xs text-gray-500 mt-2">
+                            Model Path: {model.model_path}
+                        </div>
                     </div>
-                    <div className="text-xs text-gray-500 mt-2">
-                        Created: {new Date(model.created_at).toLocaleString()}
-                    </div>
-                </div>
-            ))}
+                ))}
+            </div>
         </div>
-    </div>
-);
+    );
+};
 
 const FilterPanel = ({ model, activeFilters, onFilterChange }) => {
     if (!model?.schema_mapping) return null;
@@ -210,7 +261,7 @@ const FilterPanel = ({ model, activeFilters, onFilterChange }) => {
     );
 };
 
-const SearchResults = ({ results }) => (
+const SearchResults = ({ results, currentPage, totalPages, onPageChange }) => (
     <div className="space-y-4">
         {results.map((result, index) => (
             <div key={index} className="border rounded-lg p-4 hover:shadow-md transition-shadow">
@@ -240,6 +291,29 @@ const SearchResults = ({ results }) => (
                 </div>
             </div>
         ))}
+
+        {/* Pagination */}
+        {totalPages > 1 && (
+            <div className="flex justify-center items-center gap-4 mt-6">
+                <button
+                    onClick={() => onPageChange(currentPage - 1)}
+                    disabled={currentPage === 1}
+                    className="p-2 bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-50"
+                >
+                    <ChevronLeft className="h-4 w-4" />
+                </button>
+                <span className="text-sm text-gray-600">
+                    Page {currentPage} of {totalPages}
+                </span>
+                <button
+                    onClick={() => onPageChange(currentPage + 1)}
+                    disabled={currentPage === totalPages}
+                    className="p-2 bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-50"
+                >
+                    <ChevronRight className="h-4 w-4" />
+                </button>
+            </div>
+        )}
     </div>
 );
 
@@ -254,14 +328,17 @@ export default function ModelSearchComponent() {
         searching,
         performSearch,
         activeFilters,
-        setActiveFilters
+        setActiveFilters,
+        currentPage,
+        totalPages,
+        handlePageChange
     } = useModelSearch();
 
     const [searchQuery, setSearchQuery] = useState('');
 
     const handleSearch = async (e) => {
         e.preventDefault();
-        await performSearch(searchQuery, activeFilters);
+        await performSearch(searchQuery, activeFilters, 1); // Reset to page 1 on new search
     };
 
     if (loading) {
@@ -306,11 +383,11 @@ export default function ModelSearchComponent() {
                                 onChange={(e) => setSearchQuery(e.target.value)}
                                 placeholder="Enter search query..."
                                 className="flex-1 p-2 border rounded focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                                disabled={!selectedModel}
+                                disabled={!selectedModel || selectedModel.status !== 'completed'}
                             />
                             <button
                                 type="submit"
-                                disabled={!selectedModel || !searchQuery || searching}
+                                disabled={!selectedModel || !searchQuery || searching || selectedModel.status !== 'completed'}
                                 className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50 flex items-center gap-2"
                             >
                                 {searching ? (
@@ -324,11 +401,16 @@ export default function ModelSearchComponent() {
 
                         {/* Results */}
                         {searchResults.length > 0 ? (
-                            <SearchResults results={searchResults} />
+                            <SearchResults
+                                results={searchResults}
+                                currentPage={currentPage}
+                                totalPages={totalPages}
+                                onPageChange={handlePageChange}
+                            />
                         ) : (
                             <div className="text-center text-gray-500 p-8">
                                 {selectedModel ?
-                                    "Enter a search query to see results" :
+                                    (selectedModel.status === 'completed' ? "Enter a search query to see results" : "Only completed models can be used for searching") :
                                     "Select a model to start searching"
                                 }
                             </div>
@@ -338,7 +420,7 @@ export default function ModelSearchComponent() {
 
                 {/* Filters */}
                 <div className="col-span-12 lg:col-span-3">
-                    {selectedModel && (
+                    {selectedModel && selectedModel.status === 'completed' && (
                         <FilterPanel
                             model={selectedModel}
                             activeFilters={activeFilters}
