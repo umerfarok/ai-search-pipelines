@@ -1,6 +1,7 @@
 # AI-Powered Product Search Engine
 
 An advanced AI-based search solution that uses neural networks and transformer models to understand and match product descriptions semantically. Built with modern AI/ML technologies, Go, Python, and React.
+[![Integration Tests](https://github.com/umerfarok/ai-search-pipelines/actions/workflows/integration-tests.yml/badge.svg)](https://github.com/umerfarok/ai-search-pipelines/actions/workflows/integration-tests.yml)
 
 ## 🤖 AI Features
 
