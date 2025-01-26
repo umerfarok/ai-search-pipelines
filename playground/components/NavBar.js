@@ -7,8 +7,8 @@ export default function NavBar() {
                 <Link href="/" className="text-white">
                     Home
                 </Link>
-                <Link href="/about" className="text-white">
-                    About
+                <Link href="/search" className="text-white">
+                    Search Through Models
                 </Link>
                 <Link href="/create-config" className="text-white">
                     Create Train Config

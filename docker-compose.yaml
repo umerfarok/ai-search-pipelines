@@ -132,6 +132,7 @@ services:
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock"
       - "${LOCALSTACK_VOLUME_DIR:-./volume}:/var/lib/localstack"
+      - ./localstack/init-s3.sh:/docker-entrypoint-initaws.d/init-s3.sh
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
       interval: 30s

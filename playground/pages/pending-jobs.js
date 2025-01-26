@@ -13,7 +13,7 @@ const QueuedJobsDisplay = () => {
         const fetchJobs = async () => {
             try {
                 setLoading(true);
-                const response = await fetch(`${API_BASE_URL}/jobs/queue`);
+                const response = await fetch(`${API_BASE_URL}/queue`);
                 if (!response.ok) {
                     throw new Error('Failed to fetch jobs');
                 }

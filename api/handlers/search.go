@@ -1,5 +1,3 @@
-// api/handlers/search.go
-
 package handlers
 
 import (
@@ -70,148 +68,141 @@ func (s *SearchService) checkHealth() {
 }
 
 func (s *SearchService) Search(c *gin.Context) {
-	var req struct {
-		Query    string `json:"query"`
-		Version  string `json:"version,omitempty"`
-		MaxItems int    `json:"max_items,omitempty"`
-	}
-
+	var req config.SearchRequest
 	if err := c.BindJSON(&req); err != nil {
-		c.JSON(400, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Get latest version if not specified
-	var modelVersion config.ModelVersion
-	var err error
-
-	if req.Version == "latest" || req.Version == "" {
-		err = s.db.Collection("model_versions").FindOne(
-			context.Background(),
-			bson.M{"status": "completed"},
-			options.FindOne().SetSort(bson.D{{Key: "created_at", Value: -1}}),
-		).Decode(&modelVersion)
-	} else {
-		objID, err := primitive.ObjectIDFromHex(req.Version)
-		if err != nil {
-			c.JSON(400, gin.H{"error": "invalid version id"})
-			return
-		}
-		err = s.db.Collection("model_versions").FindOne(
-			context.Background(),
-			bson.M{"_id": objID},
-		).Decode(&modelVersion)
+	// Set default max items if not specified
+	if req.MaxItems == 0 {
+		req.MaxItems = 10
 	}
 
+	// Get the appropriate model configuration
+	modelConfig, err := s.getModelConfig(req.ConfigID)
 	if err != nil {
-		c.JSON(404, gin.H{"error": "model version not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("failed to get model config: %v", err)})
+		return
+	}
+
+	// Ensure model is in a completed state
+	if modelConfig.Status != string(config.ModelStatusCompleted) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("model is not ready for search (status: %s)", modelConfig.Status),
+		})
 		return
 	}
 
 	// Forward search request to search service
 	searchReq := struct {
-		Query     string `json:"query"`
-		ModelPath string `json:"model_path"`
-		MaxItems  int    `json:"max_items"`
+		Query     string                 `json:"query"`
+		ModelPath string                 `json:"model_path"`
+		MaxItems  int                    `json:"max_items"`
+		Filters   map[string]interface{} `json:"filters,omitempty"`
 	}{
 		Query:     req.Query,
-		ModelPath: modelVersion.S3Path,
+		ModelPath: modelConfig.ModelPath,
 		MaxItems:  req.MaxItems,
+		Filters:   req.Filters,
 	}
 
-	jsonBody, err := json.Marshal(searchReq)
+	response, err := s.performSearch(searchReq, modelConfig)
 	if err != nil {
-		c.JSON(500, gin.H{"error": "failed to marshal search request: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("search failed: %v", err)})
 		return
 	}
 
+	c.JSON(http.StatusOK, response)
+}
+
+func (s *SearchService) getModelConfig(configID string) (*config.ModelConfig, error) {
+	var modelConfig config.ModelConfig
+
+	if configID == "latest" {
+		// Get the latest completed model
+		opts := options.FindOne().SetSort(bson.D{{Key: "created_at", Value: -1}})
+		err := s.db.Collection("configs").FindOne(
+			context.Background(),
+			bson.M{"status": string(config.ModelStatusCompleted)},
+			opts,
+		).Decode(&modelConfig)
+		if err != nil {
+			return nil, fmt.Errorf("no completed models found")
+		}
+	} else {
+		// Get specific model by ID
+		objID, err := primitive.ObjectIDFromHex(configID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid config ID format")
+		}
+
+		err = s.db.Collection("configs").FindOne(
+			context.Background(),
+			bson.M{"_id": objID},
+		).Decode(&modelConfig)
+		if err != nil {
+			return nil, fmt.Errorf("model config not found")
+		}
+	}
+
+	return &modelConfig, nil
+}
+
+func (s *SearchService) performSearch(req interface{}, modelConfig *config.ModelConfig) (*config.SearchResponse, error) {
+	if modelConfig.ModelPath == "" {
+		return nil, fmt.Errorf("model path not configured")
+	}
+
+	jsonBody, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %v", err)
+	}
+
+	// Perform the search request
 	resp, err := http.Post(
 		fmt.Sprintf("%s/search", s.searchHost),
 		"application/json",
 		bytes.NewBuffer(jsonBody),
 	)
 	if err != nil {
-		c.JSON(500, gin.H{"error": "search service error: " + err.Error()})
-		return
+		return nil, fmt.Errorf("failed to call search service: %v", err)
 	}
 	defer resp.Body.Close()
 
-	var searchResults interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&searchResults); err != nil {
-		c.JSON(500, gin.H{"error": "failed to decode search results"})
-		return
+	if resp.StatusCode != http.StatusOK {
+		var errorResponse struct {
+			Error string `json:"error"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&errorResponse); err != nil {
+			return nil, fmt.Errorf("search service error (status %d)", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("search service error: %s", errorResponse.Error)
 	}
 
-	c.JSON(200, searchResults)
-}
-
-func (s *SearchService) getModelVersion(versionID string) (config.ModelVersion, error) {
-	var version config.ModelVersion
-
-	if versionID == "latest" {
-		opts := options.FindOne().SetSort(bson.D{{Key: "created_at", Value: -1}})
-		err := s.db.Collection("model_versions").FindOne(
-			context.Background(),
-			bson.M{"status": "completed"},
-			opts,
-		).Decode(&version)
-		if err != nil {
-			return version, fmt.Errorf("no completed model found")
-		}
-	} else {
-		id, err := primitive.ObjectIDFromHex(versionID)
-		if err != nil {
-			return version, fmt.Errorf("invalid version format")
-		}
-
-		err = s.db.Collection("model_versions").FindOne(
-			context.Background(),
-			bson.M{"_id": id},
-		).Decode(&version)
-		if err != nil {
-			return version, fmt.Errorf("model version not found")
-		}
+	var searchResp config.SearchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&searchResp); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %v", err)
 	}
 
-	return version, nil
+	// Add config info to response
+	searchResp.ConfigInfo = *modelConfig
+
+	return &searchResp, nil
 }
 
-// func (s *SearchService) performSearch(version config.ModelVersion, req config.SearchRequest) (*config.SearchResponse, error) {
-// 	if version.S3Path == "" {
-// 		return nil, fmt.Errorf("model version has no S3 path configured")
-// 	}
+func (s *SearchService) enhanceSearchResults(results []config.SearchResult, modelConfig *config.ModelConfig) []config.SearchResult {
+	// Add any additional metadata or post-processing of search results
+	for i := range results {
+		// Example: Add schema information or other relevant metadata
+		results[i].Metadata = map[string]interface{}{
+			"schema_version": modelConfig.Version,
+			"model_name":     modelConfig.Name,
+		}
+	}
+	return results
+}
 
-// 	requestBody := map[string]interface{}{
-// 		"model_path": version.S3Path,
-// 		"query":      req.Query,
-// 		"max_items":  req.MaxItems,
-// 	}
-
-// 	jsonBody, err := json.Marshal(requestBody)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("failed to marshal request: %v", err)
-// 	}
-
-// 	log.Printf("Sending search request with model path: %s", version.S3Path)
-
-// 	resp, err := http.Post(fmt.Sprintf("%s/search", s.searchHost), "application/json", bytes.NewBuffer(jsonBody))
-// 	if err != nil {
-// 		return nil, fmt.Errorf("failed to call search service: %v", err)
-// 	}
-// 	defer resp.Body.Close()
-
-// 	if resp.StatusCode != http.StatusOK {
-// 		body, _ := ioutil.ReadAll(resp.Body)
-// 		return nil, fmt.Errorf("search service error: %s", string(body))
-// 	}
-
-// 	var searchResp config.SearchResponse
-// 	if err := json.NewDecoder(resp.Body).Decode(&searchResp); err != nil {
-// 		return nil, fmt.Errorf("failed to decode response: %v", err)
-// 	}
-
-//		return &searchResp, nil
-//	}
 func (s *SearchService) Close() {
 	close(s.healthCheck)
 }

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"strconv"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -19,15 +20,12 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
-	typecfg "github.com/umerfarok/product-search/config"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
-)
+	"go.mongodb.org/mongo-driver/mongo/options"
 
-const (
-	trainingQueueKey  = "training_queue"
-	modelStatusPrefix = "model_status:"
+	cfg "github.com/umerfarok/product-search/config"
 )
 
 type ConfigService struct {
@@ -96,8 +94,8 @@ func NewConfigService(db *mongo.Database) (*ConfigService, error) {
 	}, nil
 }
 
-func (s *ConfigService) CreateConfigWithData(c *gin.Context) {
-	// Parse multipart form with larger size limit
+func (s *ConfigService) CreateConfig(c *gin.Context) {
+	// Parse multipart form
 	if err := c.Request.ParseMultipartForm(50 << 20); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("failed to parse form: %v", err)})
 		return
@@ -110,14 +108,14 @@ func (s *ConfigService) CreateConfigWithData(c *gin.Context) {
 		return
 	}
 
-	var cfg typecfg.ProductConfig
-	if err := json.Unmarshal([]byte(configData), &cfg); err != nil {
+	var config cfg.ModelConfig
+	if err := json.Unmarshal([]byte(configData), &config); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid config format: %v", err)})
 		return
 	}
 
 	// Validate required fields
-	if err := validateConfig(&cfg); err != nil {
+	if err := validateConfig(&config); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -135,115 +133,387 @@ func (s *ConfigService) CreateConfigWithData(c *gin.Context) {
 		return
 	}
 
-	// Generate IDs and prepare metadata
-	configID := primitive.NewObjectID()
-	versionID := primitive.NewObjectID()
+	// Initialize configuration metadata
+	config.ID = primitive.NewObjectID()
 	timeNow := time.Now().UTC().Format(time.RFC3339)
+	config.CreatedAt = timeNow
+	config.UpdatedAt = timeNow
+	config.Status = string(cfg.ModelStatusPending)
+	config.Version = time.Now().Format("20060102150405")
 
-	// Prepare S3 paths
-	s3Key := path.Join("data", configID.Hex(), header.Filename)
-	modelPath := fmt.Sprintf("models/%s", versionID.Hex())
+	// Set model path based on ID and version
+	config.ModelPath = fmt.Sprintf("models/%s", config.ID.Hex())
+
+	// Handle append mode
+	if config.Mode == "append" && config.PreviousVersion != "" {
+		if err := s.validatePreviousVersion(config.PreviousVersion); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
 
 	// Upload file to S3
+	s3Key := path.Join("data", config.ID.Hex(), header.Filename)
 	if err := s.uploadFileToS3(file, s3Key); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to upload file: %v", err)})
 		return
 	}
 
-	// Update config with metadata
-	cfg.ID = configID
-	cfg.CreatedAt = timeNow
-	cfg.UpdatedAt = timeNow
-	cfg.Status = string(typecfg.ModelStatusPending)
-	cfg.DataSource.Location = s3Key
+	// Update config with file location
+	config.DataSource.Location = s3Key
 
-	// Create model version
-	version := typecfg.ModelVersion{
-		ID:        versionID,
-		ConfigID:  configID,
-		Version:   time.Now().Format("20060102150405"),
-		Status:    string(typecfg.ModelStatusPending),
-		S3Path:    modelPath,
-		CreatedAt: timeNow,
-		UpdatedAt: timeNow,
-		Config:    cfg, // Store complete config for reference
+	// Initialize training stats
+	config.TrainingStats = &cfg.TrainingStats{
+		StartTime: timeNow,
+		Progress:  0,
 	}
 
-	// Save config first
-	if _, err := s.db.Collection("configs").InsertOne(context.Background(), cfg); err != nil {
+	// Save config to MongoDB
+	if err := s.saveConfig(&config); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
 		return
 	}
 
-	// Save version
-	if _, err := s.db.Collection("model_versions").InsertOne(context.Background(), version); err != nil {
-		// If version save fails, attempt to rollback config
-		if _, deleteErr := s.db.Collection("configs").DeleteOne(context.Background(), bson.M{"_id": configID}); deleteErr != nil {
-			log.Printf("Warning: Failed to rollback config after version save error: %v", deleteErr)
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save model version: %v", err)})
-		return
-	}
-
-	// Prepare training job
-	job := typecfg.QueuedJob{
-		VersionID: versionID.Hex(),
-		ConfigID:  configID.Hex(),
-		Config: map[string]interface{}{
-			"schema_mapping": cfg.SchemaMapping,
-			"data_source": map[string]interface{}{
-				"type":     cfg.DataSource.Type,
-				"location": fmt.Sprintf("s3://%s/%s", s.s3Bucket, s3Key),
-			},
-			"mode":            cfg.Mode,
-			"training_config": cfg.TrainingConfig,
-		},
-		S3Path: modelPath,
-	}
-
-	// Save initial status in Redis
-	statusKey := fmt.Sprintf("%s%s", modelStatusPrefix, versionID.Hex())
-	initialStatus := map[string]interface{}{
-		"status":    typecfg.ModelStatusPending,
-		"timestamp": timeNow,
-	}
-
-	statusBytes, _ := json.Marshal(initialStatus)
-	if err := s.redisClient.Set(context.Background(), statusKey, statusBytes, 24*time.Hour).Err(); err != nil {
-		log.Printf("Warning: Failed to set initial status in Redis: %v", err)
-	}
-
 	// Queue training job
-	jobBytes, _ := json.Marshal(job)
-	if err := s.redisClient.LPush(context.Background(), trainingQueueKey, jobBytes).Err(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to queue job: %v", err)})
+	if err := s.queueTrainingJob(&config); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to queue training job: %v", err)})
 		return
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
 		"status": "success",
 		"data": gin.H{
-			"config_id":  configID.Hex(),
-			"version_id": versionID.Hex(),
-			"file_path":  cfg.DataSource.Location,
-			"model_path": modelPath,
+			"config_id":  config.ID.Hex(),
+			"version":    config.Version,
+			"model_path": config.ModelPath,
 		},
 	})
 }
-func validateConfig(cfg *typecfg.ProductConfig) error {
-	if cfg.Name == "" {
+
+func (s *ConfigService) GetConfig(c *gin.Context) {
+	id, err := primitive.ObjectIDFromHex(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id format"})
+		return
+	}
+
+	var config cfg.ModelConfig
+	err = s.db.Collection("configs").FindOne(
+		context.Background(),
+		bson.M{"_id": id},
+	).Decode(&config)
+
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			c.JSON(http.StatusNotFound, gin.H{"error": "configuration not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, config)
+}
+
+func (s *ConfigService) ListConfigs(c *gin.Context) {
+	filter := bson.M{}
+
+	// Add filters
+	if status := c.Query("status"); status != "" {
+		filter["status"] = status
+	}
+
+	if mode := c.Query("mode"); mode != "" {
+		filter["mode"] = mode
+	}
+
+	// Add pagination
+	limit := 10
+	if limitStr := c.Query("limit"); limitStr != "" {
+		if val, err := strconv.Atoi(limitStr); err == nil {
+			limit = val
+		}
+	}
+
+	skip := 0
+	if page := c.Query("page"); page != "" {
+		if val, err := strconv.Atoi(page); err == nil {
+			skip = (val - 1) * limit
+		}
+	}
+
+	opts := options.Find().
+		SetSort(bson.D{{Key: "created_at", Value: -1}}).
+		SetLimit(int64(limit)).
+		SetSkip(int64(skip))
+
+	cursor, err := s.db.Collection("configs").Find(context.Background(), filter, opts)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to fetch configurations: %v", err)})
+		return
+	}
+	defer cursor.Close(context.Background())
+
+	var configs []cfg.ModelConfig
+	if err := cursor.All(context.Background(), &configs); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Get total count for pagination
+	total, err := s.db.Collection("configs").CountDocuments(context.Background(), filter)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get total count"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"configs": configs,
+		"total":   total,
+		"page":    skip/limit + 1,
+		"limit":   limit,
+	})
+}
+
+func (s *ConfigService) UpdateConfigStatus(c *gin.Context) {
+	configID := c.Param("id")
+	if configID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "config_id is required"})
+		return
+	}
+
+	var updateReq struct {
+		Status    string  `json:"status" binding:"required"`
+		Error     string  `json:"error,omitempty"`
+		Progress  float64 `json:"progress,omitempty"`
+		UpdatedAt string  `json:"updated_at"`
+	}
+
+	if err := c.ShouldBindJSON(&updateReq); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Update Redis status for quick access
+	statusKey := fmt.Sprintf("model_status:%s", configID)
+	status := map[string]interface{}{
+		"status":     updateReq.Status,
+		"error":      updateReq.Error,
+		"progress":   updateReq.Progress,
+		"updated_at": updateReq.UpdatedAt,
+	}
+
+	statusBytes, _ := json.Marshal(status)
+	if err := s.redisClient.Set(context.Background(), statusKey, statusBytes, 24*time.Hour).Err(); err != nil {
+		log.Printf("Warning: Failed to update Redis status: %v", err)
+	}
+
+	// Update MongoDB
+	objID, err := primitive.ObjectIDFromHex(configID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid config id"})
+		return
+	}
+
+	update := bson.M{
+		"$set": bson.M{
+			"status":                  updateReq.Status,
+			"error":                   updateReq.Error,
+			"updated_at":              updateReq.UpdatedAt,
+			"training_stats.progress": updateReq.Progress,
+		},
+	}
+
+	result, err := s.db.Collection("configs").UpdateOne(
+		context.Background(),
+		bson.M{"_id": objID},
+		update,
+	)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update config"})
+		return
+	}
+
+	if result.MatchedCount == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "config not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "updated"})
+}
+
+func (s *ConfigService) validatePreviousVersion(previousVersion string) error {
+	id, err := primitive.ObjectIDFromHex(previousVersion)
+	if err != nil {
+		return fmt.Errorf("invalid previous version id")
+	}
+
+	var prevConfig cfg.ModelConfig
+	err = s.db.Collection("configs").FindOne(
+		context.Background(),
+		bson.M{
+			"_id":    id,
+			"status": cfg.ModelStatusCompleted,
+		},
+	).Decode(&prevConfig)
+
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return fmt.Errorf("previous version not found or not completed")
+		}
+		return fmt.Errorf("error validating previous version: %v", err)
+	}
+
+	return nil
+}
+
+func (s *ConfigService) saveConfig(config *cfg.ModelConfig) error {
+	_, err := s.db.Collection("configs").InsertOne(context.Background(), config)
+	return err
+}
+
+func (s *ConfigService) queueTrainingJob(config *cfg.ModelConfig) error {
+	job := cfg.QueuedJob{
+		ConfigID:  config.ID.Hex(),
+		Config:    *config,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	jobBytes, err := json.Marshal(job)
+	if err != nil {
+		return fmt.Errorf("failed to marshal job: %v", err)
+	}
+
+	return s.redisClient.LPush(context.Background(), "training_queue", jobBytes).Err()
+}
+
+func validateConfig(config *cfg.ModelConfig) error {
+	if config.Name == "" {
 		return fmt.Errorf("name is required")
 	}
-	if cfg.DataSource.Type == "" {
+
+	if config.DataSource.Type == "" {
 		return fmt.Errorf("data_source.type is required")
 	}
-	if cfg.Mode == "" {
-		cfg.Mode = "replace"
+
+	if config.Mode != "replace" && config.Mode != "append" {
+		return fmt.Errorf("mode must be either 'replace' or 'append'")
 	}
-	if cfg.TrainingConfig.BatchSize == 0 {
-		cfg.TrainingConfig.BatchSize = 128
+
+	if config.Mode == "append" && config.PreviousVersion == "" {
+		return fmt.Errorf("previous_version is required for append mode")
 	}
+
+	if config.SchemaMapping.NameColumn == "" {
+		return fmt.Errorf("schema_mapping.name_column is required")
+	}
+
+	if config.SchemaMapping.IDColumn == "" {
+		return fmt.Errorf("schema_mapping.id_column is required")
+	}
+
+	// Set default values
+	if config.TrainingConfig.BatchSize == 0 {
+		config.TrainingConfig.BatchSize = 128
+	}
+
+	if config.TrainingConfig.MaxTokens == 0 {
+		config.TrainingConfig.MaxTokens = 512
+	}
+
+	if config.TrainingConfig.ValidationSplit == 0 {
+		config.TrainingConfig.ValidationSplit = 0.2
+	}
+
 	return nil
+}
+
+func (s *ConfigService) GetTrainingStatus(c *gin.Context) {
+	configID := c.Param("id")
+	if configID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "config_id is required"})
+		return
+	}
+
+	// Check Redis status first for performance
+	statusKey := fmt.Sprintf("model_status:%s", configID)
+	statusData, err := s.redisClient.Get(context.Background(), statusKey).Bytes()
+	if err == nil {
+		var status map[string]interface{}
+		if err := json.Unmarshal(statusData, &status); err == nil {
+			c.JSON(http.StatusOK, status)
+			return
+		}
+	}
+
+	// Fall back to MongoDB
+	id, err := primitive.ObjectIDFromHex(configID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid config_id format"})
+		return
+	}
+
+	var config cfg.ModelConfig
+	err = s.db.Collection("configs").FindOne(
+		context.Background(),
+		bson.M{"_id": id},
+	).Decode(&config)
+
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			c.JSON(http.StatusNotFound, gin.H{"error": "config not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Return status response
+	c.JSON(http.StatusOK, gin.H{
+		"status":         config.Status,
+		"error":          config.Error,
+		"progress":       config.TrainingStats.Progress,
+		"updated_at":     config.UpdatedAt,
+		"training_stats": config.TrainingStats,
+	})
+}
+
+func (s *ConfigService) GetQueuedJobs(c *gin.Context) {
+	queueLen, err := s.redisClient.LLen(context.Background(), "training_queue").Result()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to get queue length: %v", err)})
+		return
+	}
+
+	if queueLen == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"count": 0,
+			"jobs":  []interface{}{},
+		})
+		return
+	}
+
+	jobsData, err := s.redisClient.LRange(context.Background(), "training_queue", 0, queueLen-1).Result()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to get jobs: %v", err)})
+		return
+	}
+
+	var jobs []cfg.QueuedJob
+	for _, jobData := range jobsData {
+		var job cfg.QueuedJob
+		if err := json.Unmarshal([]byte(jobData), &job); err != nil {
+			log.Printf("Error parsing job data: %v", err)
+			continue
+		}
+		jobs = append(jobs, job)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"count": len(jobs),
+		"jobs":  jobs,
+	})
 }
 
 func (s *ConfigService) uploadFileToS3(file multipart.File, key string) error {
@@ -274,185 +544,4 @@ func (s *ConfigService) uploadFileToS3(file multipart.File, key string) error {
 func isValidCSVFile(header *multipart.FileHeader) bool {
 	ext := path.Ext(header.Filename)
 	return ext == ".csv"
-}
-
-func (s *ConfigService) GetTrainingStatus(c *gin.Context) {
-	versionID := c.Param("id")
-	if versionID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "version_id is required"})
-		return
-	}
-
-	// Check Redis status first
-	statusKey := fmt.Sprintf("%s%s", modelStatusPrefix, versionID)
-	statusData, err := s.redisClient.Get(context.Background(), statusKey).Bytes()
-	if err == nil {
-		var status map[string]interface{}
-		if err := json.Unmarshal(statusData, &status); err == nil {
-			c.JSON(http.StatusOK, status)
-			return
-		}
-	}
-
-	// Fall back to database status
-	id, err := primitive.ObjectIDFromHex(versionID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid version_id format"})
-		return
-	}
-
-	var version typecfg.ModelVersion
-	err = s.db.Collection("model_versions").FindOne(
-		context.Background(),
-		bson.M{"_id": id},
-	).Decode(&version)
-
-	if err != nil {
-		if err == mongo.ErrNoDocuments {
-			c.JSON(http.StatusNotFound, gin.H{"error": "model version not found"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"status":     version.Status,
-		"error":      version.Error,
-		"updated_at": version.UpdatedAt,
-	})
-}
-
-func (s *ConfigService) UpdateModelVersionStatus(c *gin.Context) {
-	versionID := c.Param("id")
-	if versionID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "version_id is required"})
-		return
-	}
-
-	var updateReq struct {
-		Status    string `json:"status" binding:"required"`
-		Error     string `json:"error,omitempty"`
-		UpdatedAt string `json:"updated_at"`
-	}
-
-	if err := c.ShouldBindJSON(&updateReq); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Update Redis status
-	statusKey := fmt.Sprintf("%s%s", modelStatusPrefix, versionID)
-	status := map[string]interface{}{
-		"status":     updateReq.Status,
-		"error":      updateReq.Error,
-		"updated_at": updateReq.UpdatedAt,
-	}
-
-	statusBytes, _ := json.Marshal(status)
-	if err := s.redisClient.Set(context.Background(), statusKey, statusBytes, 24*time.Hour).Err(); err != nil {
-		log.Printf("Warning: Failed to update Redis status: %v", err)
-	}
-
-	// Update MongoDB
-	objID, err := primitive.ObjectIDFromHex(versionID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid version id"})
-		return
-	}
-
-	update := bson.M{
-		"$set": bson.M{
-			"status":     updateReq.Status,
-			"error":      updateReq.Error,
-			"updated_at": updateReq.UpdatedAt,
-		},
-	}
-
-	result, err := s.db.Collection("model_versions").UpdateOne(
-		context.Background(),
-		bson.M{"_id": objID},
-		update,
-	)
-
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update version"})
-		return
-	}
-
-	if result.MatchedCount == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "version not found"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"status": "updated"})
-}
-
-func (s *ConfigService) GetQueuedJobs(c *gin.Context) {
-	// Get all jobs from Redis queue without removing them
-	queueLen, err := s.redisClient.LLen(context.Background(), trainingQueueKey).Result()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to get queue length: %v", err)})
-		return
-	}
-
-	if queueLen == 0 {
-		c.JSON(http.StatusOK, gin.H{
-			"count": 0,
-			"jobs":  []interface{}{},
-		})
-		return
-	}
-
-	// Get all jobs using LRANGE
-	jobsData, err := s.redisClient.LRange(context.Background(), trainingQueueKey, 0, queueLen-1).Result()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to get jobs: %v", err)})
-		return
-	}
-
-	// Parse each job
-	var jobs []typecfg.QueuedJob
-	for _, jobData := range jobsData {
-		var job typecfg.QueuedJob
-		if err := json.Unmarshal([]byte(jobData), &job); err != nil {
-			log.Printf("Error parsing job data: %v", err)
-			continue
-		}
-		jobs = append(jobs, job)
-	}
-
-	// Return jobs with count
-	c.JSON(http.StatusOK, gin.H{
-		"count": len(jobs),
-		"jobs":  jobs,
-	})
-}
-
-// Helper method to ensure Redis and MongoDB are in sync
-func (s *ConfigService) syncStatus(versionID string) error {
-	ctx := context.Background()
-
-	// Get status from MongoDB
-	objID, err := primitive.ObjectIDFromHex(versionID)
-	if err != nil {
-		return err
-	}
-
-	var version typecfg.ModelVersion
-	err = s.db.Collection("model_versions").FindOne(ctx, bson.M{"_id": objID}).Decode(&version)
-	if err != nil {
-		return err
-	}
-
-	// Update Redis with MongoDB status
-	status := map[string]interface{}{
-		"status":     version.Status,
-		"error":      version.Error,
-		"updated_at": version.UpdatedAt,
-	}
-
-	statusBytes, _ := json.Marshal(status)
-	statusKey := fmt.Sprintf("%s%s", modelStatusPrefix, versionID)
-	return s.redisClient.Set(ctx, statusKey, statusBytes, 24*time.Hour).Err()
 }
