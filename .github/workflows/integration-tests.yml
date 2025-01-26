@@ -1,11 +1,24 @@
 name: Integration Tests
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+  # push:
+  #   branches: [ main ]
+  # pull_request:
+  #   branches: [ main ]
   workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to run tests in'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+      skip_logs:
+        description: 'Skip collecting logs on failure'
+        required: false
+        type: boolean
 
 env:
   AWS_ACCESS_KEY: test
