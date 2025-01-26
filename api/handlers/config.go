@@ -1,5 +1,5 @@
 // api/handlers/config.go
-
+// create Config service
 package handlers
 
 import (
@@ -76,28 +76,57 @@ func CreateConfig(db *mongo.Database) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var cfg config.ProductConfig
 		if err := c.BindJSON(&cfg); err != nil {
-			c.JSON(400, gin.H{"error": err.Error()})
+			c.JSON(400, gin.H{
+				"status": "error",
+				"error":  "Invalid request format: " + err.Error(),
+			})
 			return
 		}
 
-		// Validate required fields
-		if cfg.Name == "" || cfg.DataSource.Type == "" || cfg.DataSource.Location == "" {
-			c.JSON(400, gin.H{"error": "name, data_source.type, and data_source.location are required"})
+		// Enhanced validation
+		validationErrors := make([]string, 0)
+		if cfg.Name == "" {
+			validationErrors = append(validationErrors, "name is required")
+		}
+		if cfg.DataSource.Type == "" {
+			validationErrors = append(validationErrors, "data_source.type is required")
+		}
+		if cfg.DataSource.Location == "" {
+			validationErrors = append(validationErrors, "data_source.location is required")
+		}
+		if len(validationErrors) > 0 {
+			c.JSON(400, gin.H{
+				"status": "error",
+				"errors": validationErrors,
+			})
 			return
 		}
 
+		// Initialize new config with metadata
 		cfg.ID = primitive.NewObjectID()
-		cfg.CreatedAt = time.Now().UTC()
-		cfg.UpdatedAt = cfg.CreatedAt
+		cfg.CreatedAt = time.Now().UTC().Format("2006-01-02T15:04:05.999999")
+		cfg.UpdatedAt = time.Now().UTC().Format("2006-01-02T15:04:05.999999")
 		cfg.Status = "created"
 
-		_, err := db.Collection("configs").InsertOne(context.Background(), cfg)
+		// Insert into MongoDB with error handling
+		result, err := db.Collection("configs").InsertOne(context.Background(), cfg)
 		if err != nil {
-			c.JSON(500, gin.H{"error": "failed to create configuration: " + err.Error()})
+			c.JSON(500, gin.H{
+				"status": "error",
+				"error":  "Database error: " + err.Error(),
+			})
 			return
 		}
 
-		c.JSON(201, cfg)
+		// Return success response
+		c.JSON(201, gin.H{
+			"status": "success",
+			"data": gin.H{
+				"id":     result.InsertedID,
+				"config": cfg,
+			},
+			"message": "Configuration created successfully",
+		})
 	}
 }
 
@@ -139,7 +168,7 @@ func UpdateConfig(db *mongo.Database) gin.HandlerFunc {
 		}
 
 		cfg.ID = id
-		cfg.UpdatedAt = time.Now().UTC()
+		cfg.UpdatedAt = time.Now().UTC().Format("2006-01-02T15:04:05.999999")
 
 		result, err := db.Collection("configs").UpdateOne(
 			context.Background(),

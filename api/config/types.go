@@ -8,66 +8,70 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
+type ModelStatus string
+
+const (
+	ModelStatusPending    ModelStatus = "pending"
+	ModelStatusQueued     ModelStatus = "queued"
+	ModelStatusProcessing ModelStatus = "processing"
+	ModelStatusCompleted  ModelStatus = "completed"
+	ModelStatusFailed     ModelStatus = "failed"
+	ModelStatusCanceled   ModelStatus = "canceled"
+)
+
 type ProductConfig struct {
-	ID             primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	Name           string             `bson:"name" json:"name"`
-	Description    string             `bson:"description" json:"description"`
-	DataSource     DataSource         `bson:"data_source" json:"data_source"`
-	TrainingConfig TrainingConfig     `bson:"training_config" json:"training_config"`
-	SchemaMapping  SchemaMapping      `bson:"schema_mapping" json:"schema_mapping"`
-	CreatedAt      time.Time          `bson:"created_at" json:"created_at"`
-	UpdatedAt      time.Time          `bson:"updated_at" json:"updated_at"`
-	Status         string             `bson:"status" json:"status"`
+	ID              primitive.ObjectID `json:"_id" bson:"_id"`
+	SchemaMapping   SchemaMapping      `json:"schema_mapping" bson:"schema_mapping"`
+	Name            string             `json:"name" bson:"name"` // Name of the model
+	DataSource      DataSource         `json:"data_source" bson:"data_source"`
+	Mode            string             `json:"mode" bson:"mode"` // "replace" or "append"
+	TrainingConfig  TrainingConfig     `json:"training_config" bson:"training_config"`
+	PreviousVersion string             `json:"previous_version,omitempty" bson:"previous_version,omitempty"`
+	Status          string             `json:"status" bson:"status"`
+	CreatedAt       string             `json:"created_at" bson:"created_at"`
+	UpdatedAt       string             `json:"updated_at" bson:"updated_at"`
 }
-
 type DataSource struct {
-	Type      string   `bson:"type" json:"type"`
-	Location  string   `bson:"location" json:"location"`
-	TableName string   `bson:"table_name,omitempty" json:"table_name,omitempty"`
-	Query     string   `bson:"query,omitempty" json:"query,omitempty"`
-	Columns   []Column `bson:"columns" json:"columns"`
+	Type     string   `json:"type"`
+	Location string   `json:"location"`
+	Columns  []Column `json:"columns"`
 }
-
 type Column struct {
-	Name        string `bson:"name" json:"name"`
-	Type        string `bson:"type" json:"type"`
-	Role        string `bson:"role" json:"role"`
-	Description string `bson:"description" json:"description"`
+	Name string `json:"name"`
+	Type string `json:"type"`
+	Role string `json:"role"`
 }
-
 type TrainingConfig struct {
-	ModelType      string `bson:"model_type" json:"model_type"`
-	EmbeddingModel string `bson:"embedding_model" json:"embedding_model"`
-	ZeroShotModel  string `bson:"zero_shot_model" json:"zero_shot_model"`
-	BatchSize      int    `bson:"batch_size" json:"batch_size"`
-	MaxTokens      int    `bson:"max_tokens" json:"max_tokens"`
+	ModelType      string `json:"model_type"`
+	EmbeddingModel string `json:"embedding_model"`
+	BatchSize      int    `json:"batch_size"`
+	MaxTokens      int    `json:"max_tokens"`
 }
-
 type SchemaMapping struct {
-	IDColumn       string         `bson:"id_column" json:"id_column"`
-	NameColumn     string         `bson:"name_column" json:"name_column"`
-	DescColumn     string         `bson:"description_column" json:"description_column"`
-	CategoryColumn string         `bson:"category_column,omitempty" json:"category_column,omitempty"`
-	PriceColumn    string         `bson:"price_column,omitempty" json:"price_column,omitempty"`
-	CustomColumns  []CustomColumn `bson:"custom_columns,omitempty" json:"custom_columns,omitempty"`
+	IDColumn          string         `json:"id_column"`
+	NameColumn        string         `json:"name_column"`
+	DescriptionColumn string         `json:"description_column"`
+	CategoryColumn    string         `json:"category_column"`
+	CustomColumns     []CustomColumn `json:"custom_columns"`
 }
 
 type CustomColumn struct {
-	UserColumn     string `bson:"user_column" json:"user_column"`
-	StandardColumn string `bson:"standard_column" json:"standard_column"`
-	Role           string `bson:"role" json:"role"`
+	UserColumn     string `json:"user_column"`
+	StandardColumn string `json:"standard_column"`
+	Role           string `json:"role"`
 }
 
 type ModelVersion struct {
-	ID           primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	ConfigID     primitive.ObjectID `bson:"config_id" json:"config_id"`
-	Version      string             `bson:"version" json:"version"`
-	Status       string             `bson:"status" json:"status"`
-	CreatedAt    time.Time          `bson:"created_at" json:"created_at"`
-	ArtifactPath string             `bson:"artifact_path" json:"artifact_path"`
-	Error        string             `bson:"error,omitempty" json:"error,omitempty"`
+	ID        primitive.ObjectID `bson:"_id" json:"id"`
+	ConfigID  primitive.ObjectID `bson:"config_id" json:"config_id"`
+	Version   string             `bson:"version" json:"version"`
+	Status    string             `bson:"status" json:"status"`
+	S3Path    string             `bson:"s3_path" json:"s3_path"`
+	CreatedAt string             `bson:"created_at" json:"created_at"`
+	UpdatedAt string             `bson:"updated_at" json:"updated_at"`
+	Error     string             `bson:"error,omitempty" json:"error,omitempty"`
+	Config    interface{}        `bson:"config" json:"config"`
 }
-
 type Product struct {
 	ID        primitive.ObjectID     `bson:"_id,omitempty" json:"id"`
 	ConfigID  primitive.ObjectID     `bson:"config_id" json:"config_id"`
@@ -94,4 +98,23 @@ type SearchResult struct {
 type SearchResponse struct {
 	Results []SearchResult `json:"results"`
 	Total   int            `json:"total"`
+}
+
+type ModelConfig struct {
+	ID             primitive.ObjectID `bson:"_id" json:"id"`
+	Name           string             `bson:"name" json:"name"`
+	Description    string             `bson:"description" json:"description"`
+	DataSource     DataSource         `bson:"data_source" json:"data_source"`
+	SchemaMapping  SchemaMapping      `bson:"schema_mapping" json:"schema_mapping"`
+	TrainingConfig TrainingConfig     `bson:"training_config" json:"training_config"`
+	CreatedAt      time.Time          `bson:"created_at" json:"created_at"`
+	UpdatedAt      time.Time          `bson:"updated_at" json:"updated_at"`
+	Status         string             `bson:"status" json:"status"`
+}
+
+type QueuedJob struct {
+	VersionID string                 `json:"version_id"`
+	ConfigID  string                 `json:"config_id"`
+	Config    map[string]interface{} `json:"config"`
+	S3Path    string                 `json:"s3_path"`
 }

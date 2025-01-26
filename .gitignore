@@ -6,3 +6,4 @@ playground/.next
 playground/node_modules
 playground/.next
 trainer/venv
+volume

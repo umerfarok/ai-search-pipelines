@@ -1,9 +1,7 @@
-// main.go
 package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"os"
 	"time"
@@ -11,7 +9,6 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/umerfarok/product-search/handlers"
-	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -20,6 +17,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// MongoDB setup
 	mongoURI := os.Getenv("MONGO_URI")
 	if mongoURI == "" {
 		mongoURI = "mongodb://root:example@localhost:27017"
@@ -37,14 +35,13 @@ func main() {
 
 	db := client.Database("product_search")
 
-	if err := createIndexes(db); err != nil {
-		log.Fatal("Failed to create indexes:", err)
+	// Initialize config service
+	configService, err := handlers.NewConfigService(db)
+	if err != nil {
+		log.Fatal("Failed to initialize config service:", err)
 	}
 
-	// Initialize services
-	searchService := handlers.NewSearchService(db)
-	trainingService := handlers.NewTrainingService(db)
-
+	// Setup Gin
 	r := gin.Default()
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     []string{"*"},
@@ -55,24 +52,27 @@ func main() {
 		MaxAge:           12 * time.Hour,
 	}))
 
-	// Config routes
-	r.POST("/config", handlers.CreateConfig(db))
+
+	r.POST("/config/create", configService.CreateConfigWithData)
 	r.GET("/config/:id", handlers.GetConfig(db))
 	r.GET("/config", handlers.ListConfigs(db))
+	r.GET("/config/status/:id", configService.GetTrainingStatus)
+	r.PUT("/config/status/:id", configService.UpdateModelVersionStatus)
 
-	// Training routes
-	r.POST("/model/train", trainingService.TriggerTraining)
+
 	r.GET("/model/versions", handlers.GetModelVersions(db))
 	r.GET("/model/version/:id", handlers.GetModelVersion(db))
-	r.POST("/data/upload", handlers.UploadData(db))
-	// Product routes
-	r.POST("/products/update", handlers.UpdateProducts(db))
-	r.GET("/products", handlers.GetProducts(db))
+	r.PUT("/model/version/:id/status", configService.UpdateModelVersionStatus)
+	r.GET("/jobs/queue", configService.GetQueuedJobs)
 
-	// Search routes
-	r.POST("/search", searchService.Search)
-	r.PUT("/model/version/:id/status", handlers.UpdateModelVersionStatus(db))
+	if searchHandler := handlers.NewSearchService(db); searchHandler != nil {
+		r.POST("/search", searchHandler.Search)
+	}
 
+
+	r.GET("/training/status/:id", configService.GetTrainingStatus)
+
+	// Start server
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -82,32 +82,4 @@ func main() {
 	if err := r.Run(":" + port); err != nil {
 		log.Fatal("Failed to start server:", err)
 	}
-}
-
-func createIndexes(db *mongo.Database) error {
-	collections := map[string][]mongo.IndexModel{
-		"configs": {
-			{Keys: bson.D{{Key: "created_at", Value: -1}}},
-			{Keys: bson.D{{Key: "status", Value: 1}}},
-		},
-		"model_versions": {
-			{Keys: bson.D{{Key: "config_id", Value: 1}}},
-			{Keys: bson.D{{Key: "created_at", Value: -1}}},
-			{Keys: bson.D{{Key: "status", Value: 1}}},
-		},
-		"products": {
-			{Keys: bson.D{{Key: "config_id", Value: 1}}},
-			{Keys: bson.D{{Key: "created_at", Value: -1}}},
-			{Keys: bson.D{{Key: "status", Value: 1}}},
-		},
-	}
-
-	for collection, indexes := range collections {
-		_, err := db.Collection(collection).Indexes().CreateMany(context.Background(), indexes)
-		if err != nil {
-			return fmt.Errorf("failed to create indexes for %s: %v", collection, err)
-		}
-	}
-
-	return nil
 }

@@ -1,57 +1,59 @@
-# syntax=docker/dockerfile:1
-
 ARG PYTHON_VERSION=3.9
 ARG BUILD_TYPE=cpu
+ARG PYTORCH_INDEX=https://download.pytorch.org/whl/cpu
 
-FROM python:${PYTHON_VERSION}-slim AS base
-
-ARG BUILD_TYPE
-ENV BUILD_TYPE=${BUILD_TYPE}
+FROM python:${PYTHON_VERSION}-slim as base
 
 WORKDIR /app
 
-# Install minimal required system dependencies
-RUN apt-get update && apt-get install -y \
+# Install system dependencies and cleanup in a single layer
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
     git \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Set up directories
-RUN mkdir -p /app/models /app/data && \
-    chmod 777 /app/models /app/data
+# Create non-root user
+RUN adduser --disabled-password --gecos '' appuser && \
+    mkdir -p /app/models /app/data && \
+    chown -R appuser:appuser /app
 
-# CPU variant
-FROM base AS cpu
-# First install PyTorch CPU
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
-# Then install other requirements from PyPI
-RUN pip install --no-cache-dir \
-    sentence-transformers \
-    flask \
-    redis \
-    numpy \
-    pandas \
-    pymongo
+# Set Python environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_RETRIES=10 \
+    PIP_TIMEOUT=100 \
+    PIP_DEFAULT_TIMEOUT=100
 
-# GPU variant
-FROM base AS gpu
-# First install PyTorch GPU
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu118
-# Then install other requirements from PyPI
-RUN pip install --no-cache-dir \
-    sentence-transformers \
-    flask \
-    redis \
-    numpy \
-    pandas \
-    pymongo
+FROM base as builder
 
-# Final stage
-FROM ${BUILD_TYPE} AS final
+ARG BUILD_TYPE
+ARG PYTORCH_INDEX
 
-# Copy application code
-COPY . .
+# Copy requirements first for better caching
+COPY requirements.txt .
+
+# Install dependencies with retry logic and increased timeout
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir torch --index-url ${PYTORCH_INDEX} --timeout 100 && \
+    pip install --no-cache-dir -r requirements.txt --timeout 100
+
+FROM builder as dev
+
+USER appuser
+
+# Keep container running for development
+CMD ["tail", "-f", "/dev/null"]
+
+FROM builder as prod
+
+COPY --chown=appuser:appuser . .
+
+USER appuser
 
 # Default command (will be overridden by docker-compose)
 CMD ["python", "app.py"]
+

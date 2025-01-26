@@ -7,11 +7,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -72,36 +70,79 @@ func (s *SearchService) checkHealth() {
 }
 
 func (s *SearchService) Search(c *gin.Context) {
-	var req config.SearchRequest
+	var req struct {
+		Query    string `json:"query"`
+		Version  string `json:"version,omitempty"`
+		MaxItems int    `json:"max_items,omitempty"`
+	}
+
 	if err := c.BindJSON(&req); err != nil {
-		c.JSON(400, gin.H{"error": "invalid request: " + err.Error()})
+		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
 
-	if req.Query == "" {
-		c.JSON(400, gin.H{"error": "query is required"})
-		return
+	// Get latest version if not specified
+	var modelVersion config.ModelVersion
+	var err error
+
+	if req.Version == "latest" || req.Version == "" {
+		err = s.db.Collection("model_versions").FindOne(
+			context.Background(),
+			bson.M{"status": "completed"},
+			options.FindOne().SetSort(bson.D{{Key: "created_at", Value: -1}}),
+		).Decode(&modelVersion)
+	} else {
+		objID, err := primitive.ObjectIDFromHex(req.Version)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "invalid version id"})
+			return
+		}
+		err = s.db.Collection("model_versions").FindOne(
+			context.Background(),
+			bson.M{"_id": objID},
+		).Decode(&modelVersion)
 	}
 
-	if req.MaxItems <= 0 {
-		req.MaxItems = 10 // Default value
-	}
-
-	// Get model version
-	version, err := s.getModelVersion(req.Version)
 	if err != nil {
-		c.JSON(404, gin.H{"error": err.Error()})
+		c.JSON(404, gin.H{"error": "model version not found"})
 		return
 	}
 
-	// Perform search
-	results, err := s.performSearch(version, req)
+	// Forward search request to search service
+	searchReq := struct {
+		Query     string `json:"query"`
+		ModelPath string `json:"model_path"`
+		MaxItems  int    `json:"max_items"`
+	}{
+		Query:     req.Query,
+		ModelPath: modelVersion.S3Path,
+		MaxItems:  req.MaxItems,
+	}
+
+	jsonBody, err := json.Marshal(searchReq)
 	if err != nil {
-		c.JSON(500, gin.H{"error": "search failed: " + err.Error()})
+		c.JSON(500, gin.H{"error": "failed to marshal search request: " + err.Error()})
 		return
 	}
 
-	c.JSON(200, results)
+	resp, err := http.Post(
+		fmt.Sprintf("%s/search", s.searchHost),
+		"application/json",
+		bytes.NewBuffer(jsonBody),
+	)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "search service error: " + err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+
+	var searchResults interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&searchResults); err != nil {
+		c.JSON(500, gin.H{"error": "failed to decode search results"})
+		return
+	}
+
+	c.JSON(200, searchResults)
 }
 
 func (s *SearchService) getModelVersion(versionID string) (config.ModelVersion, error) {
@@ -135,47 +176,42 @@ func (s *SearchService) getModelVersion(versionID string) (config.ModelVersion, 
 	return version, nil
 }
 
-// api/handlers/search.go
+// func (s *SearchService) performSearch(version config.ModelVersion, req config.SearchRequest) (*config.SearchResponse, error) {
+// 	if version.S3Path == "" {
+// 		return nil, fmt.Errorf("model version has no S3 path configured")
+// 	}
 
-func (s *SearchService) performSearch(version config.ModelVersion, req config.SearchRequest) (*config.SearchResponse, error) {
-	// Ensure the model path is absolute and clean
-	modelPath := filepath.Clean(version.ArtifactPath)
-	if !filepath.IsAbs(modelPath) {
-		modelPath = filepath.Join("./models", version.Version)
-	}
+// 	requestBody := map[string]interface{}{
+// 		"model_path": version.S3Path,
+// 		"query":      req.Query,
+// 		"max_items":  req.MaxItems,
+// 	}
 
-	requestBody := map[string]interface{}{
-		"model_path": modelPath,
-		"query":      req.Query,
-		"max_items":  req.MaxItems,
-	}
+// 	jsonBody, err := json.Marshal(requestBody)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to marshal request: %v", err)
+// 	}
 
-	jsonBody, err := json.Marshal(requestBody)
-	log.Printf("Sending search request with model path: %s", modelPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %v", err)
-	}
+// 	log.Printf("Sending search request with model path: %s", version.S3Path)
 
-	log.Printf("Sending search request with model path: %s", modelPath)
+// 	resp, err := http.Post(fmt.Sprintf("%s/search", s.searchHost), "application/json", bytes.NewBuffer(jsonBody))
+// 	if err != nil {
+// 		return nil, fmt.Errorf("failed to call search service: %v", err)
+// 	}
+// 	defer resp.Body.Close()
 
-	resp, err := http.Post(fmt.Sprintf("%s/search", s.searchHost), "application/json", bytes.NewBuffer(jsonBody))
-	if err != nil {
-		return nil, fmt.Errorf("failed to call search service: %v", err)
-	}
-	defer resp.Body.Close()
+// 	if resp.StatusCode != http.StatusOK {
+// 		body, _ := ioutil.ReadAll(resp.Body)
+// 		return nil, fmt.Errorf("search service error: %s", string(body))
+// 	}
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := ioutil.ReadAll(resp.Body)
-		return nil, fmt.Errorf("search service error: %s", string(body))
-	}
+// 	var searchResp config.SearchResponse
+// 	if err := json.NewDecoder(resp.Body).Decode(&searchResp); err != nil {
+// 		return nil, fmt.Errorf("failed to decode response: %v", err)
+// 	}
 
-	var searchResp config.SearchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&searchResp); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %v", err)
-	}
-
-	return &searchResp, nil
-}
+//		return &searchResp, nil
+//	}
 func (s *SearchService) Close() {
 	close(s.healthCheck)
 }
