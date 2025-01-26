@@ -3,12 +3,12 @@ import {
     AlertCircle,
     Upload,
     CheckCircle2,
-    HelpCircle,
-    Search,
-    Loader2,
     XCircle,
+    Loader2,
     Clock,
     AlertTriangle,
+    ChevronDown,
+    ChevronUp,
 } from "lucide-react";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
@@ -194,40 +194,6 @@ const useTraining = (configId) => {
     return { trainingStatus, error, monitorTraining };
 };
 
-const useSearch = () => {
-    const [searchResults, setSearchResults] = useState([]);
-    const [isSearching, setIsSearching] = useState(false);
-    const [error, setError] = useState("");
-
-    const performSearch = async (query, configId) => {
-        try {
-            setIsSearching(true);
-            const response = await fetch(`${API_BASE_URL}/search`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    query,
-                    config_id: configId || "latest",
-                    max_items: 10,
-                }),
-            });
-
-            if (!response.ok) {
-                throw new Error("Search failed");
-            }
-
-            const data = await response.json();
-            setSearchResults(data.results);
-        } catch (err) {
-            setError(err.message);
-        } finally {
-            setIsSearching(false);
-        }
-    };
-
-    return { performSearch, searchResults, isSearching, error };
-};
-
 // Status Badge Component
 const StatusBadge = ({ status }) => {
     const getStatusColor = (status) => {
@@ -297,7 +263,7 @@ const ModelList = ({ onSelect, selectedConfigId }) => {
         fetchModels();
     }, []);
 
-    if (loading) return <div className="p-4">Loading models...</div>;
+    if (loading) return <div className="p-4 text-gray-600">Loading models...</div>;
     if (error) return <div className="p-4 text-red-500">{error}</div>;
 
     return (
@@ -305,9 +271,8 @@ const ModelList = ({ onSelect, selectedConfigId }) => {
             {models.map((model) => (
                 <div
                     key={model._id}
-                    className={`p-4 border rounded-lg cursor-pointer transition-colors ${
-                        selectedConfigId === model._id ? "border-blue-500 bg-blue-50" : "hover:bg-gray-50"
-                    }`}
+                    className={`p-4 border rounded-lg cursor-pointer transition-colors ${selectedConfigId === model._id ? "border-blue-500 bg-blue-50" : "hover:bg-gray-50"
+                        }`}
                     onClick={() => onSelect(model._id)}
                 >
                     <div className="flex justify-between items-center mb-2">
@@ -318,68 +283,6 @@ const ModelList = ({ onSelect, selectedConfigId }) => {
                     <div className="mt-2 text-xs text-gray-500">
                         Created: {new Date(model.created_at).toLocaleString()}
                     </div>
-                </div>
-            ))}
-        </div>
-    );
-};
-
-// Search Box Component
-const SearchBox = ({ selectedConfigId, onSearch, loading }) => {
-    const [query, setQuery] = useState("");
-
-    const handleSearch = (e) => {
-        e.preventDefault();
-        onSearch(query);
-    };
-
-    return (
-        <form onSubmit={handleSearch} className="space-y-4">
-            <div className="flex gap-2">
-                <input
-                    type="text"
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    placeholder="Enter search query..."
-                    className="flex-1 p-2 border rounded focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                />
-                <button
-                    type="submit"
-                    disabled={loading || !query}
-                    className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50 flex items-center"
-                >
-                    {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
-                </button>
-            </div>
-        </form>
-    );
-};
-
-// Search Results Component
-const SearchResults = ({ results }) => {
-    if (!results?.length) return null;
-
-    return (
-        <div className="space-y-4">
-            {results.map((result, index) => (
-                <div key={index} className="p-4 border rounded-lg">
-                    <h3 className="font-semibold">{result.name}</h3>
-                    <p className="text-sm text-gray-600 mt-1">{result.description}</p>
-                    <div className="flex justify-between items-center mt-2">
-                        <span className="text-sm text-gray-500">{result.category}</span>
-                        <span className="text-sm font-medium">
-                            Score: {(result.score * 100).toFixed(1)}%
-                        </span>
-                    </div>
-                    {Object.keys(result.metadata).length > 0 && (
-                        <div className="mt-2 text-sm text-gray-500">
-                            {Object.entries(result.metadata).map(([key, value]) => (
-                                <div key={key}>
-                                    {key}: {value}
-                                </div>
-                            ))}
-                        </div>
-                    )}
                 </div>
             ))}
         </div>
@@ -398,11 +301,10 @@ export default function ProductSearchConfig() {
 
     const { handleFileUpload, isUploading, csvHeaders, error: uploadError } = useFileUpload();
     const { trainingStatus, error: trainingError } = useTraining(configId);
-    const { performSearch, searchResults, isSearching, error: searchError } = useSearch();
 
     const [selectedConfigId, setSelectedConfigId] = useState(null);
-    const [step, setStep] = useState(1);
     const [csvFile, setCsvFile] = useState(null);
+    const [showColumns, setShowColumns] = useState(false);
 
     const handleFileUploadWrapper = (e) => {
         const file = e.target.files?.[0];
@@ -423,19 +325,15 @@ export default function ProductSearchConfig() {
         }
     };
 
-    const handleSearch = (query) => {
-        performSearch(query, selectedConfigId);
-    };
-
     return (
-        <div className="max-w-4xl mx-auto p-6 space-y-8">
-            <h1 className="text-2xl font-bold">Product Search Configuration</h1>
+        <div className="max-w-7xl mx-auto p-6 space-y-8">
+            <h1 className="text-3xl font-bold text-gray-900">Product Search Configuration</h1>
 
             {/* Error Display */}
-            {(configError || uploadError || trainingError || searchError) && (
+            {(configError || uploadError || trainingError) && (
                 <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-center text-red-700">
                     <AlertCircle className="h-4 w-4 mr-2" />
-                    <p>{configError || uploadError || trainingError || searchError}</p>
+                    <p>{configError || uploadError || trainingError}</p>
                 </div>
             )}
 
@@ -443,45 +341,45 @@ export default function ProductSearchConfig() {
             {trainingStatus?.status === ModelStatus.COMPLETED && (
                 <div className="bg-green-50 border border-green-200 rounded-lg p-4 flex items-center text-green-700">
                     <CheckCircle2 className="h-4 w-4 mr-2" />
-                    <p>Model trained successfully! Ready for search.</p>
+                    <p>Model trained successfully!</p>
                 </div>
             )}
 
             {/* Main Content Area */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                 {/* Left Column - Configuration Form */}
                 <div className="space-y-6">
-                    <div className="border rounded-lg p-6">
-                        <h2 className="text-xl font-semibold mb-4">Create New Model</h2>
-                        
+                    <div className="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
+                        <h2 className="text-xl font-semibold text-gray-900 mb-6">Create New Model</h2>
+
                         {/* Basic Info */}
-                        <div className="space-y-4 mb-6">
+                        <div className="space-y-6">
                             <div>
-                                <label className="block text-sm font-medium mb-1">Model Name</label>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Model Name</label>
                                 <input
                                     type="text"
                                     value={config.name}
                                     onChange={(e) => setConfig(prev => ({ ...prev, name: e.target.value }))}
-                                    className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                                    className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                     placeholder="Enter model name"
                                 />
                             </div>
                             <div>
-                                <label className="block text-sm font-medium mb-1">Description</label>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Description</label>
                                 <textarea
                                     value={config.description}
                                     onChange={(e) => setConfig(prev => ({ ...prev, description: e.target.value }))}
-                                    className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                                    className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                     placeholder="Enter description"
                                     rows={3}
                                 />
                             </div>
                             <div>
-                                <label className="block text-sm font-medium mb-1">Training Mode</label>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Training Mode</label>
                                 <select
                                     value={config.mode}
                                     onChange={(e) => setConfig(prev => ({ ...prev, mode: e.target.value }))}
-                                    className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                                    className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                 >
                                     <option value="replace">Replace (New Model)</option>
                                     <option value="append">Append (Update Existing)</option>
@@ -489,7 +387,7 @@ export default function ProductSearchConfig() {
                             </div>
                             {config.mode === "append" && (
                                 <div>
-                                    <label className="block text-sm font-medium mb-1">Previous Model</label>
+                                    <label className="block text-sm font-medium text-gray-700 mb-2">Previous Model</label>
                                     <ModelList
                                         onSelect={(id) => setConfig(prev => ({ ...prev, previous_version: id }))}
                                         selectedConfigId={config.previous_version}
@@ -499,10 +397,10 @@ export default function ProductSearchConfig() {
                         </div>
 
                         {/* File Upload */}
-                        <div className="space-y-4 mb-6">
-                            <label className="block text-sm font-medium mb-1">Upload Data</label>
+                        <div className="mt-6">
+                            <label className="block text-sm font-medium text-gray-700 mb-2">Upload Data</label>
                             <div
-                                className="border-2 border-dashed rounded-lg p-8 text-center hover:border-blue-500 transition-colors"
+                                className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-blue-500 transition-colors"
                                 onDragOver={(e) => e.preventDefault()}
                                 onDrop={(e) => {
                                     e.preventDefault();
@@ -513,7 +411,7 @@ export default function ProductSearchConfig() {
                                 <div className="flex flex-col items-center space-y-4">
                                     <Upload className="h-12 w-12 text-gray-400" />
                                     <div className="space-y-2">
-                                        <h3 className="font-semibold">Upload CSV file</h3>
+                                        <h3 className="font-semibold text-gray-900">Upload CSV file</h3>
                                         <p className="text-sm text-gray-500">Drag and drop or click to select</p>
                                     </div>
                                     <label className="cursor-pointer">
@@ -524,28 +422,50 @@ export default function ProductSearchConfig() {
                                             onChange={handleFileUploadWrapper}
                                             disabled={isUploading}
                                         />
-                                        <span className="px-4 py-2 border rounded hover:bg-gray-50 inline-block">
+                                        <span className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 inline-block text-sm font-medium text-gray-700">
                                             {isUploading ? "Uploading..." : "Select File"}
                                         </span>
                                     </label>
                                 </div>
                             </div>
                             {csvFile && (
-                                <div className="bg-green-50 border border-green-200 rounded p-4 flex items-center">
+                                <div className="mt-4 bg-green-50 border border-green-200 rounded-lg p-4 flex items-center">
                                     <CheckCircle2 className="h-4 w-4 text-green-500 mr-2" />
-                                    <span>File loaded: {csvFile.name}</span>
+                                    <span className="text-sm text-green-700">File loaded: {csvFile.name}</span>
                                 </div>
                             )}
                         </div>
 
+                        {/* CSV Columns Display */}
+                        {csvHeaders.length > 0 && (
+                            <div className="mt-6">
+                                <div
+                                    className="flex justify-between items-center cursor-pointer"
+                                    onClick={() => setShowColumns(!showColumns)}
+                                >
+                                    <h3 className="text-sm font-medium text-gray-700">Loaded CSV Columns</h3>
+                                    {showColumns ? <ChevronUp className="h-4 w-4 text-gray-500" /> : <ChevronDown className="h-4 w-4 text-gray-500" />}
+                                </div>
+                                {showColumns && (
+                                    <div className="mt-4 grid grid-cols-2 gap-2">
+                                        {csvHeaders.map((header, index) => (
+                                            <div key={index} className="p-2 bg-gray-50 rounded-lg text-sm text-gray-700">
+                                                {header}
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
                         {/* Column Mapping */}
                         {csvHeaders.length > 0 && (
-                            <div className="space-y-4">
-                                <h3 className="font-semibold">Column Mapping</h3>
+                            <div className="mt-6">
+                                <h3 className="text-sm font-medium text-gray-700 mb-4">Column Mapping</h3>
                                 <div className="grid gap-4">
                                     {["id", "name", "description", "category"].map((field) => (
                                         <div key={field}>
-                                            <label className="block text-sm font-medium mb-1">
+                                            <label className="block text-sm font-medium text-gray-700 mb-2">
                                                 {field.charAt(0).toUpperCase() + field.slice(1)} Column
                                             </label>
                                             <select
@@ -557,7 +477,7 @@ export default function ProductSearchConfig() {
                                                         [`${field}_column`]: e.target.value
                                                     }
                                                 }))}
-                                                className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                                                className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                             >
                                                 <option value="">Select column</option>
                                                 {csvHeaders.map(header => (
@@ -569,9 +489,9 @@ export default function ProductSearchConfig() {
                                 </div>
 
                                 {/* Custom Columns */}
-                                <div className="border rounded-lg p-4 space-y-4">
+                                <div className="mt-6 border border-gray-200 rounded-lg p-4 space-y-4">
                                     <div className="flex justify-between items-center">
-                                        <h3 className="font-semibold">Custom Columns</h3>
+                                        <h3 className="text-sm font-medium text-gray-700">Custom Columns</h3>
                                         <button
                                             onClick={() => setConfig(prev => ({
                                                 ...prev,
@@ -583,7 +503,7 @@ export default function ProductSearchConfig() {
                                                     ]
                                                 }
                                             }))}
-                                            className="px-3 py-1 text-sm border rounded hover:bg-gray-50"
+                                            className="px-3 py-1 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
                                         >
                                             Add Column
                                         </button>
@@ -604,7 +524,7 @@ export default function ProductSearchConfig() {
                                                         }
                                                     }));
                                                 }}
-                                                className="flex-1 p-2 border rounded"
+                                                className="flex-1 p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                             >
                                                 <option value="">Select column</option>
                                                 {csvHeaders.map(header => (
@@ -626,7 +546,7 @@ export default function ProductSearchConfig() {
                                                         }
                                                     }));
                                                 }}
-                                                className="flex-1 p-2 border rounded"
+                                                className="flex-1 p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                             />
                                             <select
                                                 value={col.role}
@@ -641,7 +561,7 @@ export default function ProductSearchConfig() {
                                                         }
                                                     }));
                                                 }}
-                                                className="w-32 p-2 border rounded"
+                                                className="w-32 p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                             >
                                                 <option value="metadata">Metadata</option>
                                                 <option value="training">Training</option>
@@ -672,7 +592,7 @@ export default function ProductSearchConfig() {
                             <button
                                 onClick={handleSubmit}
                                 disabled={isSubmitting || !csvFile}
-                                className="w-full px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50 flex items-center justify-center"
+                                className="w-full px-4 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center"
                             >
                                 {isSubmitting ? (
                                     <>
@@ -687,39 +607,24 @@ export default function ProductSearchConfig() {
                     </div>
                 </div>
 
-                {/* Right Column - Models and Search */}
+                {/* Right Column - Models */}
                 <div className="space-y-6">
                     {/* Available Models */}
-                    <div className="border rounded-lg p-6">
-                        <h2 className="text-xl font-semibold mb-4">Available Models</h2>
+                    <div className="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
+                        <h2 className="text-xl font-semibold text-gray-900 mb-6">Available Models</h2>
                         <ModelList
                             onSelect={setSelectedConfigId}
                             selectedConfigId={selectedConfigId}
                         />
                     </div>
-
-                    {/* Search Box */}
-                    {selectedConfigId && (
-                        <div className="border rounded-lg p-6">
-                            <h2 className="text-xl font-semibold mb-4">Search Products</h2>
-                            <SearchBox
-                                selectedConfigId={selectedConfigId}
-                                onSearch={handleSearch}
-                                loading={isSearching}
-                            />
-                            <div className="mt-4">
-                                <SearchResults results={searchResults} />
-                            </div>
-                        </div>
-                    )}
                 </div>
             </div>
 
             {/* Training Status */}
             {configId && trainingStatus && (
-                <div className="border rounded-lg p-6 mt-6">
+                <div className="bg-white border border-gray-200 rounded-lg shadow-sm p-6 mt-6">
                     <div className="flex items-center justify-between mb-4">
-                        <h2 className="text-xl font-semibold">Training Status</h2>
+                        <h2 className="text-xl font-semibold text-gray-900">Training Status</h2>
                         <StatusBadge status={trainingStatus.status} />
                     </div>
                     <div className="space-y-2">
