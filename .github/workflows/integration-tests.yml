@@ -1,0 +1,136 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  AWS_ACCESS_KEY: test
+  AWS_SECRET_KEY: test
+  S3_BUCKET: product-search
+  AWS_REGION: us-east-1
+  AWS_ENDPOINT_URL: http://localhost:4566
+  AWS_SSL_VERIFY: "false"
+  PYTORCH_INDEX: https://download.pytorch.org/whl/cpu
+  DOCKER_BUILDKIT: 1
+  COMPOSE_DOCKER_CLI_BUILD: 1
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '16'
+
+    - name: Install test dependencies
+      run: |
+        npm install axios form-data
+
+    - name: Create env file
+      run: |
+        cat << EOF > .env
+        AWS_ACCESS_KEY=test
+        AWS_SECRET_KEY=test
+        S3_BUCKET=product-search
+        AWS_REGION=us-east-1
+        AWS_ENDPOINT_URL=http://localstack:4566
+        AWS_SSL_VERIFY=false
+        PYTORCH_INDEX=https://download.pytorch.org/whl/cpu
+        EOF
+
+    - name: Start services
+      run: |
+        docker-compose up -d
+        echo "Waiting for services to be healthy..."
+        
+        # Function to check service health
+        check_health() {
+          local service=$1
+          local max_attempts=$2
+          local attempt=1
+          
+          while [ $attempt -le $max_attempts ]; do
+            if docker-compose ps "$service" | grep -q "healthy"; then
+              echo "✓ $service is healthy"
+              return 0
+            fi
+            echo "Waiting for $service to be healthy (attempt $attempt/$max_attempts)..."
+            sleep 10
+            attempt=$((attempt + 1))
+          done
+          
+          echo "❌ $service failed to become healthy"
+          docker-compose logs "$service"
+          return 1
+        }
+        
+        # Check health of each service
+        services=("api" "search-service" "training-service" "redis" "mongo" "localstack")
+        for service in "${services[@]}"; do
+          if ! check_health "$service" 12; then
+            echo "Service startup failed"
+            docker-compose logs
+            exit 1
+          fi
+        done
+
+    - name: Initialize LocalStack S3
+      run: |
+        echo "Waiting for LocalStack to be ready..."
+        timeout 60s bash -c 'until curl -s http://localhost:4566/_localstack/health | grep -q "\"s3\": \"running\""; do sleep 1; done'
+        
+        # Create S3 bucket using AWS CLI with LocalStack endpoint
+        aws --endpoint-url=http://localhost:4566 \
+            --region us-east-1 \
+            --no-verify-ssl \
+            s3 mb s3://product-search
+        
+        # Verify bucket creation
+        aws --endpoint-url=http://localhost:4566 \
+            --region us-east-1 \
+            --no-verify-ssl \
+            s3 ls | grep product-search
+
+    - name: Run integration tests
+      run: |
+        export API_BASE_URL=http://localhost:8080
+        node test-flow.js
+
+    - name: Collect logs on failure
+      if: failure()
+      run: |
+        mkdir -p logs
+        
+        # Collect service logs
+        services=("api" "search-service" "training-service" "redis" "mongo" "localstack")
+        for service in "${services[@]}"; do
+          echo "=== $service Logs ===" > "logs/$service.log"
+          docker-compose logs "$service" >> "logs/$service.log" 2>&1
+        done
+        
+        # Create summary log
+        echo "=== Integration Test Logs ===" > logs/summary.log
+        cat logs/*.log >> logs/summary.log
+
+    - name: Upload test logs
+      if: failure()
+      uses: actions/upload-artifact@v3
+      with:
+        name: service-logs
+        path: logs/
+
+    - name: Cleanup
+      if: always()
+      run: |
+        docker-compose down -v

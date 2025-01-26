@@ -1,10 +1,32 @@
-# localstack/init-s3.sh
 #!/bin/bash
+# /docker-entrypoint-initaws.d/init-s3.sh
 
-# Create the bucket
-awslocal s3 mb s3://local-bucket
+# Wait for LocalStack to be ready
+until curl -s http://localhost:4566/_localstack/health | grep -q "\"s3\": \"running\""; do
+    echo "Waiting for LocalStack S3 to be ready..."
+    sleep 1
+done
 
-# Set bucket policy to public (for development only)
-awslocal s3api put-bucket-acl --bucket local-bucket --acl public-read-write
+# Create bucket
+awslocal s3 mb s3://product-search
 
-echo "LocalStack S3 initialized with bucket: local-bucket"
+# Enable versioning (optional)
+awslocal s3api put-bucket-versioning \
+    --bucket product-search \
+    --versioning-configuration Status=Enabled
+
+# Configure CORS (if needed)
+awslocal s3api put-bucket-cors \
+    --bucket product-search \
+    --cors-configuration '{
+        "CORSRules": [
+            {
+                "AllowedHeaders": ["*"],
+                "AllowedMethods": ["GET", "PUT", "POST", "DELETE"],
+                "AllowedOrigins": ["*"],
+                "ExposeHeaders": []
+            }
+        ]
+    }'
+
+echo "S3 bucket 'product-search' initialized successfully"
