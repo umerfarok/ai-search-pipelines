@@ -1,821 +1,663 @@
-import React, { useState, useCallback, useEffect } from 'react';
-import { AlertCircle, Upload, CheckCircle2, HelpCircle, Search, Loader2 } from 'lucide-react';
+import React, { useState, useCallback, useEffect } from "react";
+import {
+    AlertCircle,
+    Upload,
+    CheckCircle2,
+    XCircle,
+    Loader2,
+    Clock,
+    AlertTriangle,
+    ChevronDown,
+    ChevronUp,
+} from "lucide-react";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 
-// Form Field Component
-const FormField = ({ label, tooltip, error, children }) => (
-    <div className="space-y-2">
-        <label className="flex items-center space-x-2">
-            <span className="text-sm font-medium">{label}</span>
-            {tooltip && (
-                <div className="relative group">
-                    <HelpCircle className="h-4 w-4 text-gray-400 cursor-help" />
-                    <div className="absolute hidden group-hover:block z-50 w-48 p-2 text-sm bg-black text-white rounded shadow-lg -top-2 left-6">
-                        {tooltip}
-                    </div>
-                </div>
-            )}
-        </label>
-        {children}
-        {error && <p className="text-sm text-red-500">{error}</p>}
-    </div>
-);
-
-// Search Results Component
-const SearchResults = ({ results }) => (
-    <div className="space-y-3">
-        {results.map((result, index) => (
-            <div
-                key={index}
-                className="p-4 border rounded-lg hover:shadow-md transition-shadow duration-200 bg-white"
-            >
-                <h4 className="font-semibold text-lg">{result.name}</h4>
-                <p className="text-sm text-gray-600 mb-2">{result.description}</p>
-                <div className="flex justify-between items-center text-sm text-gray-500">
-                    <span className="bg-gray-100 px-2 py-1 rounded-full text-xs">
-                        {result.category}
-                    </span>
-                    <span className="font-medium">
-                        Match: {(result.score * 100).toFixed(1)}%
-                    </span>
-                </div>
-            </div>
-        ))}
-    </div>
-);
-
-// Navigation Prompt Dialog
-const NavigationPrompt = ({ isOpen, onConfirm, onCancel }) => {
-    if (!isOpen) return null;
-
-    return (
-        <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center">
-            <div className="bg-white p-6 rounded-lg max-w-md w-full mx-4">
-                <h3 className="text-lg font-semibold mb-2">Are you sure you want to leave?</h3>
-                <p className="text-gray-600 mb-4">
-                    You have unsaved changes. If you leave, your training progress will be lost.
-                </p>
-                <div className="flex justify-end space-x-2">
-                    <button
-                        onClick={onCancel}
-                        className="px-4 py-2 border rounded hover:bg-gray-50"
-                    >
-                        Cancel
-                    </button>
-                    <button
-                        onClick={onConfirm}
-                        className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
-                    >
-                        Continue
-                    </button>
-                </div>
-            </div>
-        </div>
-    );
+const ModelStatus = {
+    PENDING: "pending",
+    QUEUED: "queued",
+    PROCESSING: "processing",
+    COMPLETED: "completed",
+    FAILED: "failed",
+    CANCELED: "canceled",
 };
 
-// Basic Info Step
-const BasicInfoStep = ({ config, setConfig, onNext }) => {
-    const [errors, setErrors] = useState({});
-
-    const validate = () => {
-        const newErrors = {};
-        if (!config.name.trim()) newErrors.name = 'Name is required';
-        if (!config.description.trim()) newErrors.description = 'Description is required';
-        setErrors(newErrors);
-        return Object.keys(newErrors).length === 0;
-    };
-
-    const handleNext = () => {
-        if (validate()) onNext();
-    };
-
-    return (
-        <div className="space-y-6 p-6">
-            <h2 className="text-xl font-semibold">Basic Information</h2>
-            <div className="space-y-4">
-                <FormField
-                    label="Configuration Name"
-                    tooltip="Give your search configuration a descriptive name"
-                    error={errors.name}
-                >
-                    <input
-                        type="text"
-                        className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                        value={config.name}
-                        onChange={e => setConfig(prev => ({ ...prev, name: e.target.value }))}
-                        placeholder="Enter configuration name"
-                    />
-                </FormField>
-                <FormField
-                    label="Description"
-                    tooltip="Describe the purpose of this search configuration"
-                    error={errors.description}
-                >
-                    <textarea
-                        className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500 focus:outline-none min-h-[100px]"
-                        value={config.description}
-                        onChange={e => setConfig(prev => ({ ...prev, description: e.target.value }))}
-                        placeholder="Enter description"
-                    />
-                </FormField>
-                <button
-                    className="w-full sm:w-auto px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50"
-                    onClick={handleNext}
-                >
-                    Next
-                </button>
-            </div>
-        </div>
-    );
-};
-
-// CSV Upload Step
-const CsvUploadStep = ({ onFileUpload, csvHeaders, csvFile, onBack, onNext, isUploading }) => {
-    const [dragActive, setDragActive] = useState(false);
-
-    const handleDrag = useCallback((e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        if (e.type === "dragenter" || e.type === "dragover") {
-            setDragActive(true);
-        } else if (e.type === "dragleave") {
-            setDragActive(false);
-        }
-    }, []);
-
-    const handleDrop = useCallback((e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        setDragActive(false);
-
-        const files = e.dataTransfer.files;
-        if (files && files[0]) {
-            const file = files[0];
-            if (file.type === "text/csv" || file.name.endsWith('.csv')) {
-                onFileUpload({ target: { files: [file] } });
-            }
-        }
-    }, [onFileUpload]);
-
-    const handleFileInput = useCallback((e) => {
-        const file = e.target.files?.[0];
-        if (file && (file.type === "text/csv" || file.name.endsWith('.csv'))) {
-            onFileUpload(e);
-        }
-    }, [onFileUpload]);
-
-    return (
-        <div className="space-y-6 p-6">
-            <h2 className="text-xl font-semibold">Upload Product Data</h2>
-            <div 
-                className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors duration-200 ${
-                    dragActive ? 'border-blue-500 bg-blue-50' : 'hover:border-blue-500'
-                }`}
-                onDragEnter={handleDrag}
-                onDragLeave={handleDrag}
-                onDragOver={handleDrag}
-                onDrop={handleDrop}
-            >
-                <div className="flex flex-col items-center space-y-4">
-                    <Upload className="h-12 w-12 text-gray-400" />
-                    <div className="space-y-2">
-                        <h3 className="font-semibold">Upload CSV file</h3>
-                        <p className="text-sm text-gray-500">
-                            Drag and drop or click to select
-                        </p>
-                    </div>
-                    <label className="relative cursor-pointer">
-                        <input
-                            type="file"
-                            className="hidden"
-                            accept=".csv,text/csv"
-                            onChange={handleFileInput}
-                            disabled={isUploading}
-                        />
-                        <button
-                            type="button"
-                            className={`px-4 py-2 border rounded ${
-                                isUploading ? 'bg-gray-100' : 'hover:bg-gray-50'
-                            }`}
-                            disabled={isUploading}
-                            onClick={() => document.querySelector('input[type="file"]').click()}
-                        >
-                            {isUploading ? (
-                                <span className="flex items-center">
-                                    <Loader2 className="animate-spin mr-2 h-4 w-4" />
-                                    Uploading...
-                                </span>
-                            ) : (
-                                'Select File'
-                            )}
-                        </button>
-                    </label>
-                </div>
-            </div>
-
-            {csvFile && (
-                <div className="bg-green-50 border border-green-200 rounded p-4 flex items-center">
-                    <CheckCircle2 className="h-4 w-4 text-green-500 mr-2" />
-                    <span>Successfully loaded: {csvFile.name}</span>
-                </div>
-            )}
-
-            {csvHeaders.length > 0 && (
-                <div className="border rounded-lg p-4">
-                    <h4 className="font-semibold mb-2">Detected Columns</h4>
-                    <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-                        {csvHeaders.map(header => (
-                            <div key={header} className="px-3 py-1 bg-gray-100 rounded-full text-sm text-center">
-                                {header}
-                            </div>
-                        ))}
-                    </div>
-                </div>
-            )}
-
-            <div className="flex justify-between pt-4">
-                <button 
-                    className="px-4 py-2 border rounded hover:bg-gray-50"
-                    onClick={onBack}
-                >
-                    Back
-                </button>
-                <button
-                    className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50"
-                    onClick={onNext}
-                    disabled={!csvFile || isUploading}
-                >
-                    Next
-                </button>
-            </div>
-        </div>
-    );
-};
-// Column Mapping Step
-const ColumnMappingStep = ({ config, setConfig, csvHeaders, onBack, onSubmit, loading }) => {
-    const [errors, setErrors] = useState({});
-
-    const validate = () => {
-        const newErrors = {};
-        if (!config.schema_mapping.id_column) newErrors.id = 'ID column is required';
-        if (!config.schema_mapping.name_column) newErrors.name = 'Name column is required';
-        setErrors(newErrors);
-        return Object.keys(newErrors).length === 0;
-    };
-
-    const handleSubmit = () => {
-        if (validate()) onSubmit();
-    };
-
-    const handleCustomColumnAdd = () => {
-        setConfig(prev => ({
-            ...prev,
-            schema_mapping: {
-                ...prev.schema_mapping,
-                custom_columns: [
-                    ...prev.schema_mapping.custom_columns,
-                    { user_column: '', standard_column: '', role: 'metadata' }
-                ]
-            }
-        }));
-    };
-
-    return (
-        <div className="space-y-6 p-6">
-            <h2 className="text-xl font-semibold">Column Mapping</h2>
-            <div className="space-y-6">
-                <div className="grid gap-4">
-                    {['id', 'name', 'description', 'category'].map(field => (
-                        <FormField
-                            key={field}
-                            label={`${field.charAt(0).toUpperCase() + field.slice(1)} Column`}
-                            tooltip={`Select the column that contains ${field} information`}
-                            error={errors[field]}
-                        >
-                            <select
-                                className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                                value={config.schema_mapping[`${field}_column`]}
-                                onChange={e => setConfig(prev => ({
-                                    ...prev,
-                                    schema_mapping: {
-                                        ...prev.schema_mapping,
-                                        [`${field}_column`]: e.target.value
-                                    }
-                                }))}
-                            >
-                                <option value="">Select column</option>
-                                {csvHeaders.map(header => (
-                                    <option key={header} value={header}>{header}</option>
-                                ))}
-                            </select>
-                        </FormField>
-                    ))}
-                </div>
-
-                <div className="border rounded-lg p-4 space-y-4">
-                    <div className="flex justify-between items-center">
-                        <h3 className="font-semibold">Custom Columns</h3>
-                        <button
-                            className="px-3 py-1 text-sm border rounded hover:bg-gray-50"
-                            onClick={handleCustomColumnAdd}
-                        >
-                            Add Column
-                        </button>
-                    </div>
-
-                    {config.schema_mapping.custom_columns.map((col, index) => (
-                        <div key={index} className="flex gap-2 items-center">
-                            <select
-                                className="flex-1 p-2 border rounded"
-                                value={col.user_column}
-                                onChange={e => {
-                                    const newColumns = [...config.schema_mapping.custom_columns];
-                                    newColumns[index].user_column = e.target.value;
-                                    setConfig(prev => ({
-                                        ...prev,
-                                        schema_mapping: {
-                                            ...prev.schema_mapping,
-                                            custom_columns: newColumns
-                                        }
-                                    }));
-                                }}
-                            >
-                                <option value="">Select column</option>
-                                {csvHeaders.map(header => (
-                                    <option key={header} value={header}>{header}</option>
-                                ))}
-                            </select>
-                            <input
-                                type="text"
-                                className="flex-1 p-2 border rounded"
-                                placeholder="Standard column name"
-                                value={col.standard_column}
-                                onChange={e => {
-                                    const newColumns = [...config.schema_mapping.custom_columns];
-                                    newColumns[index].standard_column = e.target.value;
-                                    setConfig(prev => ({
-                                        ...prev,
-                                        schema_mapping: {
-                                            ...prev.schema_mapping,
-                                            custom_columns: newColumns
-                                        }
-                                    }));
-                                }}
-                            />
-                            <select
-                                className="p-2 border rounded"
-                                value={col.role}
-                                onChange={e => {
-                                    const newColumns = [...config.schema_mapping.custom_columns];
-                                    newColumns[index].role = e.target.value;
-                                    setConfig(prev => ({
-                                        ...prev,
-                                        schema_mapping: {
-                                            ...prev.schema_mapping,
-                                            custom_columns: newColumns
-                                        }
-                                    }));
-                                }}
-                            >
-                                <option value="metadata">Metadata</option>
-                                <option value="training">Training</option>
-                            </select>
-                            <button
-                                className="p-2 text-red-500 hover:text-red-600"
-                                onClick={() => {
-                                    const newColumns = config.schema_mapping.custom_columns.filter((_, i) => i !== index);
-                                    setConfig(prev => ({
-                                        ...prev,
-                                        schema_mapping: {
-                                            ...prev.schema_mapping,
-                                            custom_columns: newColumns
-                                        }
-                                    }));
-                                }}
-                            >
-                                ×
-                            </button>
-                        </div>
-                    ))}
-                </div>
-
-                <div className="flex justify-between pt-4">
-                    <button
-                        className="px-4 py-2 border rounded hover:bg-gray-50"
-                        onClick={onBack}
-                    >
-                        Back
-                    </button>
-                    <button
-                        className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50 flex items-center"
-                        onClick={handleSubmit}
-                        disabled={loading}
-                    >
-                        {loading ? (
-                            <>
-                                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                                Processing...
-                            </>
-                        ) : (
-                            'Start Training'
-                        )}
-                    </button>
-                </div>
-            </div>
-        </div>
-    );
-};
-
-// Search Box Component
-const SearchBox = ({
-    selectedVersion,
-    setSelectedVersion,
-    modelVersions,
-    searchQuery,
-    setSearchQuery,
-    handleSearch,
-    loading
-}) => (
-    <div className="border rounded-lg p-6 mt-8">
-        <h3 className="font-semibold mb-4">Search Products</h3>
-        <div className="space-y-4">
-            <select
-                className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                value={selectedVersion}
-                onChange={(e) => setSelectedVersion(e.target.value)}
-            >
-                <option value="latest">Latest Model</option>
-                {modelVersions?.map((version) => (
-                    <option key={version.id} value={version.id}>
-                        {version.version} ({version.status})
-                    </option>
-                ))}
-            </select>
-
-            <div className="flex space-x-2">
-                <input
-                    type="text"
-                    className="flex-1 p-2 border rounded focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                    placeholder="Enter search query..."
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    onKeyPress={(e) => {
-                        if (e.key === 'Enter' && !loading) {
-                            handleSearch();
-                        }
-                    }}
-                />
-                <button
-                    className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50 flex items-center"
-                    onClick={handleSearch}
-                    disabled={loading || !searchQuery}
-                >
-                    {loading ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                        <Search className="h-4 w-4" />
-                    )}
-                </button>
-            </div>
-        </div>
-    </div>
-);
-
-// Main Component
-export default function ProductSearchConfig() {
-    const [step, setStep] = useState(1);
-    const [loading, setLoading] = useState(false);
-    const [error, setError] = useState('');
-    const [success, setSuccess] = useState('');
-    const [csvHeaders, setCsvHeaders] = useState([]);
-    const [trainingStatus, setTrainingStatus] = useState(null);
-    const [modelVersions, setModelVersions] = useState([]);
-    const [selectedVersion, setSelectedVersion] = useState('latest');
-    const [searchQuery, setSearchQuery] = useState('');
-    const [searchResults, setSearchResults] = useState([]);
-    const [csvFile, setCsvFile] = useState(null);
-    const [showNavigationPrompt, setShowNavigationPrompt] = useState(false);
-    const [pendingNavigation, setPendingNavigation] = useState(null);
-    const [isUploading, setIsUploading] = useState(false);
-
+const useModelConfig = () => {
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [error, setError] = useState("");
+    const [configId, setConfigId] = useState(null);
     const [config, setConfig] = useState({
-        name: '',
-        description: '',
+        name: "",
+        description: "",
+        mode: "replace", // "replace" or "append"
+        previous_version: "", // Used for append mode
         data_source: {
-            type: 'csv',
-            location: '',
-            columns: []
+            type: "csv",
+            location: "",
+            file_type: "csv",
+            columns: [],
         },
         schema_mapping: {
-            id_column: '',
-            name_column: '',
-            description_column: '',
-            category_column: '',
-            custom_columns: []
+            id_column: "",
+            name_column: "",
+            description_column: "",
+            category_column: "",
+            custom_columns: [],
+            required_columns: [],
         },
         training_config: {
-            model_type: 'transformer',
-            embedding_model: 'sentence-transformers/all-MiniLM-L6-v2',
+            model_type: "transformer",
+            embedding_model: "sentence-transformers/all-MiniLM-L6-v2",
             batch_size: 128,
-            max_tokens: 512
-        }
+            max_tokens: 512,
+            validation_split: 0.2,
+            training_params: {},
+        },
     });
 
-    useEffect(() => {
-        fetchModelVersions();
-    }, []);
+    const submitConfig = async (file) => {
+        setIsSubmitting(true);
+        setError("");
 
-    const fetchModelVersions = async () => {
         try {
-            const response = await fetch(`${API_BASE_URL}/model/versions`);
-            if (response.ok) {
-                const data = await response.json();
-                setModelVersions(data);
+            const formData = new FormData();
+            formData.append("file", file);
+            formData.append("config", JSON.stringify(config));
+
+            const response = await fetch(`${API_BASE_URL}/config`, {
+                method: "POST",
+                body: formData,
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error || "Failed to create configuration");
             }
+
+            const data = await response.json();
+            setConfigId(data.data.config_id);
+            return data;
         } catch (err) {
-            console.error('Failed to fetch model versions:', err);
+            setError(err.message);
+            throw err;
+        } finally {
+            setIsSubmitting(false);
         }
     };
 
-    const handleNavigationAttempt = (targetStep) => {
-        if (loading) {
-            setShowNavigationPrompt(true);
-            setPendingNavigation(targetStep);
-            return false;
-        }
-        return true;
+    return {
+        config,
+        setConfig,
+        submitConfig,
+        isSubmitting,
+        error,
+        configId,
     };
+};
 
-    const handleNavigationConfirm = () => {
-        setShowNavigationPrompt(false);
-        if (pendingNavigation !== null) {
-            setStep(pendingNavigation);
-            setPendingNavigation(null);
+const useFileUpload = () => {
+    const [isUploading, setIsUploading] = useState(false);
+    const [csvHeaders, setCsvHeaders] = useState([]);
+    const [error, setError] = useState("");
+
+    const handleFileUpload = useCallback(async (file, setConfig) => {
+        if (!file) {
+            setError("No file selected");
+            return;
         }
-    };
 
-    const handleFileUpload = useCallback(async (e) => {
-        const file = e.target.files?.[0];
-        if (!file || !file.name.toLowerCase().endsWith('.csv')) {
-            setError('Please upload a CSV file');
+        if (!file.name.toLowerCase().endsWith(".csv")) {
+            setError("Please upload a CSV file");
             return;
         }
 
         setIsUploading(true);
-        setError('');
-        
+        setError("");
+
         try {
-            setCsvFile(file);
-            const filename = `${Date.now()}-${file.name}`;
-            const filepath = `/data/products/${filename}`;
-
-            setConfig(prev => ({
-                ...prev,
-                data_source: {
-                    ...prev.data_source,
-                    location: filepath
-                }
-            }));
-
-            // Read file content
             const reader = new FileReader();
             reader.onload = (event) => {
                 try {
                     const text = event.target.result;
-                    const lines = text.split('\n');
-                    if (lines.length > 0) {
-                        const headers = lines[0].trim().split(',').map(h => h.trim());
-                        setCsvHeaders(headers);
-                        setConfig(prev => ({
-                            ...prev,
-                            data_source: {
-                                ...prev.data_source,
-                                columns: headers.map(header => ({
-                                    name: header,
-                                    type: 'string',
-                                    role: 'data'
-                                }))
-                            }
-                        }));
+                    const lines = text.split("\n");
+                    if (lines.length === 0) {
+                        throw new Error("The CSV file is empty");
                     }
+                    const headers = lines[0]
+                        .trim()
+                        .split(",")
+                        .map((h) => h.trim());
+                    if (headers.length === 0) {
+                        throw new Error("No headers found in the CSV file");
+                    }
+                    setCsvHeaders(headers);
+                    setConfig((prev) => ({
+                        ...prev,
+                        data_source: {
+                            ...prev.data_source,
+                            columns: headers.map((header) => ({
+                                name: header,
+                                type: "string",
+                                role: "data",
+                                required: false,
+                            })),
+                        },
+                    }));
                 } catch (err) {
-                    setError('Failed to parse CSV file');
-                    setCsvFile(null);
-                    setCsvHeaders([]);
+                    setError(`Failed to parse CSV file: ${err.message}`);
                 }
             };
 
             reader.onerror = () => {
-                setError('Failed to read CSV file');
-                setCsvFile(null);
-                setCsvHeaders([]);
+                setError("Failed to read CSV file");
             };
 
             reader.readAsText(file);
         } catch (err) {
-            setError('Failed to process the file');
-            setCsvFile(null);
-            setCsvHeaders([]);
+            setError(`Failed to process the file: ${err.message}`);
         } finally {
             setIsUploading(false);
         }
     }, []);
 
-    const handleSearch = async () => {
-        try {
-            setLoading(true);
-            const response = await fetch(`${API_BASE_URL}/search`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    query: searchQuery,
-                    version: selectedVersion,
-                    max_items: 5
-                })
-            });
+    return { handleFileUpload, isUploading, csvHeaders, error };
+};
 
-            if (!response.ok) throw new Error('Search failed');
-            const data = await response.json();
-            setSearchResults(data.results);
-            setError('');
-        } catch (err) {
-            setError('Failed to perform search: ' + err.message);
-        } finally {
-            setLoading(false);
-        }
-    };
+const useTraining = (configId) => {
+    const [trainingStatus, setTrainingStatus] = useState(null);
+    const [error, setError] = useState("");
 
-    const handleSubmit = async () => {
-        try {
-            setLoading(true);
-            setError('');
-
-            const configResponse = await fetch(`${API_BASE_URL}/config`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(config)
-            });
-
-            if (!configResponse.ok) throw new Error('Failed to create configuration');
-
-            const configData = await configResponse.json();
-            const configId = configData.id;
-
-            const reader = new FileReader();
-            reader.onload = async (e) => {
-                const csvContent = e.target.result;
-
-                const uploadResponse = await fetch(`${API_BASE_URL}/products/update`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        config_id: configId,
-                        mode: 'replace',
-                        csv_content: csvContent
-                    })
-                });
-
-                if (!uploadResponse.ok) throw new Error('Failed to upload products');
-
-                const trainingResponse = await fetch(`${API_BASE_URL}/model/train`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ config_id: configId })
-                });
-
-                if (!trainingResponse.ok) throw new Error('Failed to start training');
-
-                const trainingData = await trainingResponse.json();
-                startTrainingMonitor(trainingData.id);
-                setSuccess('Training started successfully!');
-            };
-
-            reader.readAsText(csvFile);
-        } catch (err) {
-            setError(err.message);
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    const startTrainingMonitor = useCallback(async (versionId) => {
-        setTrainingStatus({ status: 'training', progress: 0 });
-
+    const monitorTraining = useCallback(async (configId) => {
         const checkStatus = async () => {
             try {
-                const response = await fetch(`${API_BASE_URL}/model/version/${versionId}`);
+                const response = await fetch(`${API_BASE_URL}/config/status/${configId}`);
                 const data = await response.json();
                 setTrainingStatus(data);
 
-                if (data.status === 'training') {
+                if (data.status === ModelStatus.PROCESSING || data.status === ModelStatus.QUEUED) {
                     setTimeout(checkStatus, 5000);
-                } else if (data.status === 'completed') {
-                    setSuccess('Training completed successfully!');
-                    fetchModelVersions(); // Refresh model versions list
-                } else if (data.status === 'failed') {
-                    setError(`Training failed: ${data.error}`);
                 }
             } catch (err) {
-                setError('Failed to check training status');
+                setError("Failed to check training status");
             }
         };
 
         checkStatus();
     }, []);
 
+    useEffect(() => {
+        if (configId) {
+            monitorTraining(configId);
+        }
+    }, [configId, monitorTraining]);
+
+    return { trainingStatus, error, monitorTraining };
+};
+
+// Status Badge Component
+const StatusBadge = ({ status }) => {
+    const getStatusColor = (status) => {
+        switch (status) {
+            case ModelStatus.COMPLETED:
+                return "bg-green-100 text-green-800";
+            case ModelStatus.FAILED:
+                return "bg-red-100 text-red-800";
+            case ModelStatus.PROCESSING:
+                return "bg-blue-100 text-blue-800";
+            case ModelStatus.QUEUED:
+            case ModelStatus.PENDING:
+                return "bg-yellow-100 text-yellow-800";
+            case ModelStatus.CANCELED:
+                return "bg-gray-100 text-gray-800";
+            default:
+                return "bg-gray-100 text-gray-800";
+        }
+    };
+
+    const getStatusIcon = (status) => {
+        switch (status) {
+            case ModelStatus.COMPLETED:
+                return <CheckCircle2 className="w-4 h-4" />;
+            case ModelStatus.FAILED:
+                return <XCircle className="w-4 h-4" />;
+            case ModelStatus.PROCESSING:
+                return <Loader2 className="w-4 h-4 animate-spin" />;
+            case ModelStatus.QUEUED:
+            case ModelStatus.PENDING:
+                return <Clock className="w-4 h-4" />;
+            case ModelStatus.CANCELED:
+                return <AlertTriangle className="w-4 h-4" />;
+            default:
+                return null;
+        }
+    };
+
     return (
-        <div className="max-w-4xl mx-auto p-6 space-y-8">
-            <h1 className="text-2xl font-bold mb-6">Product Search Configuration</h1>
+        <span className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-sm font-medium ${getStatusColor(status)}`}>
+            {getStatusIcon(status)}
+            {status.toLowerCase()}
+        </span>
+    );
+};
 
-            <NavigationPrompt
-                isOpen={showNavigationPrompt}
-                onConfirm={handleNavigationConfirm}
-                onCancel={() => setShowNavigationPrompt(false)}
-            />
+// Model List Component
+const ModelList = ({ onSelect, selectedConfigId }) => {
+    const [models, setModels] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState("");
 
-            {error && (
+    useEffect(() => {
+        const fetchModels = async () => {
+            try {
+                const response = await fetch(`${API_BASE_URL}/config`);
+                if (!response.ok) throw new Error("Failed to fetch models");
+                const data = await response.json();
+                setModels(data.configs);
+            } catch (err) {
+                setError(err.message);
+            } finally {
+                setLoading(false);
+            }
+        };
+
+        fetchModels();
+    }, []);
+
+    if (loading) return <div className="p-4 text-gray-600">Loading models...</div>;
+    if (error) return <div className="p-4 text-red-500">{error}</div>;
+
+    return (
+        <div className="space-y-4">
+            {models.map((model) => (
+                <div
+                    key={model._id}
+                    className={`p-4 border rounded-lg cursor-pointer transition-colors ${selectedConfigId === model._id ? "border-blue-500 bg-blue-50" : "hover:bg-gray-50"
+                        }`}
+                    onClick={() => onSelect(model._id)}
+                >
+                    <div className="flex justify-between items-center mb-2">
+                        <h3 className="font-semibold">{model.name}</h3>
+                        <StatusBadge status={model.status} />
+                    </div>
+                    <p className="text-sm text-gray-600">{model.description}</p>
+                    <div className="mt-2 text-xs text-gray-500">
+                        Created: {new Date(model.created_at).toLocaleString()}
+                    </div>
+                </div>
+            ))}
+        </div>
+    );
+};
+
+export default function ProductSearchConfig() {
+    const {
+        config,
+        setConfig,
+        submitConfig,
+        isSubmitting,
+        error: configError,
+        configId,
+    } = useModelConfig();
+
+    const { handleFileUpload, isUploading, csvHeaders, error: uploadError } = useFileUpload();
+    const { trainingStatus, error: trainingError } = useTraining(configId);
+
+    const [selectedConfigId, setSelectedConfigId] = useState(null);
+    const [csvFile, setCsvFile] = useState(null);
+    const [showColumns, setShowColumns] = useState(false);
+
+    const handleFileUploadWrapper = (e) => {
+        const file = e.target.files?.[0];
+        if (file) {
+            handleFileUpload(file, setConfig);
+            setCsvFile(file);
+        }
+    };
+
+    const handleSubmit = async () => {
+        try {
+            if (!csvFile) {
+                throw new Error("Please upload a CSV file first");
+            }
+            await submitConfig(csvFile);
+        } catch (err) {
+            console.error("Submission error:", err);
+        }
+    };
+
+    return (
+        <div className="max-w-7xl mx-auto p-6 space-y-8">
+            <h1 className="text-3xl font-bold text-gray-900">Product Search Configuration</h1>
+
+            {/* Error Display */}
+            {(configError || uploadError || trainingError) && (
                 <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-center text-red-700">
                     <AlertCircle className="h-4 w-4 mr-2" />
-                    <p>{error}</p>
+                    <p>{configError || uploadError || trainingError}</p>
                 </div>
             )}
 
-            {success && (
+            {/* Success Message */}
+            {trainingStatus?.status === ModelStatus.COMPLETED && (
                 <div className="bg-green-50 border border-green-200 rounded-lg p-4 flex items-center text-green-700">
                     <CheckCircle2 className="h-4 w-4 mr-2" />
-                    <p>{success}</p>
+                    <p>Model trained successfully!</p>
                 </div>
             )}
 
-            <SearchBox
-                selectedVersion={selectedVersion}
-                setSelectedVersion={setSelectedVersion}
-                modelVersions={modelVersions}
-                searchQuery={searchQuery}
-                setSearchQuery={setSearchQuery}
-                handleSearch={handleSearch}
-                loading={loading}
-            />
+            {/* Main Content Area */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                {/* Left Column - Configuration Form */}
+                <div className="space-y-6">
+                    <div className="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
+                        <h2 className="text-xl font-semibold text-gray-900 mb-6">Create New Model</h2>
 
-            <div className="border rounded-lg">
-                {step === 1 && (
-                    <BasicInfoStep
-                        config={config}
-                        setConfig={setConfig}
-                        onNext={() => handleNavigationAttempt(2) && setStep(2)}
-                    />
-                )}
+                        {/* Basic Info */}
+                        <div className="space-y-6">
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Model Name</label>
+                                <input
+                                    type="text"
+                                    value={config.name}
+                                    onChange={(e) => setConfig(prev => ({ ...prev, name: e.target.value }))}
+                                    className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                    placeholder="Enter model name"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Description</label>
+                                <textarea
+                                    value={config.description}
+                                    onChange={(e) => setConfig(prev => ({ ...prev, description: e.target.value }))}
+                                    className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                    placeholder="Enter description"
+                                    rows={3}
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Training Mode</label>
+                                <select
+                                    value={config.mode}
+                                    onChange={(e) => setConfig(prev => ({ ...prev, mode: e.target.value }))}
+                                    className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                >
+                                    <option value="replace">Replace (New Model)</option>
+                                    <option value="append">Append (Update Existing)</option>
+                                </select>
+                            </div>
+                            {config.mode === "append" && (
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-2">Previous Model</label>
+                                    <ModelList
+                                        onSelect={(id) => setConfig(prev => ({ ...prev, previous_version: id }))}
+                                        selectedConfigId={config.previous_version}
+                                    />
+                                </div>
+                            )}
+                        </div>
 
-                {step === 2 && (
-                    <CsvUploadStep
-                        onFileUpload={handleFileUpload}
-                        csvHeaders={csvHeaders}
-                        csvFile={csvFile}
-                        onBack={() => setStep(1)}
-                        onNext={() => setStep(3)}
-                        isUploading={isUploading}
-                    />
-                )}
+                        {/* File Upload */}
+                        <div className="mt-6">
+                            <label className="block text-sm font-medium text-gray-700 mb-2">Upload Data</label>
+                            <div
+                                className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-blue-500 transition-colors"
+                                onDragOver={(e) => e.preventDefault()}
+                                onDrop={(e) => {
+                                    e.preventDefault();
+                                    const file = e.dataTransfer.files[0];
+                                    if (file) handleFileUploadWrapper({ target: { files: [file] } });
+                                }}
+                            >
+                                <div className="flex flex-col items-center space-y-4">
+                                    <Upload className="h-12 w-12 text-gray-400" />
+                                    <div className="space-y-2">
+                                        <h3 className="font-semibold text-gray-900">Upload CSV file</h3>
+                                        <p className="text-sm text-gray-500">Drag and drop or click to select</p>
+                                    </div>
+                                    <label className="cursor-pointer">
+                                        <input
+                                            type="file"
+                                            className="hidden"
+                                            accept=".csv"
+                                            onChange={handleFileUploadWrapper}
+                                            disabled={isUploading}
+                                        />
+                                        <span className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 inline-block text-sm font-medium text-gray-700">
+                                            {isUploading ? "Uploading..." : "Select File"}
+                                        </span>
+                                    </label>
+                                </div>
+                            </div>
+                            {csvFile && (
+                                <div className="mt-4 bg-green-50 border border-green-200 rounded-lg p-4 flex items-center">
+                                    <CheckCircle2 className="h-4 w-4 text-green-500 mr-2" />
+                                    <span className="text-sm text-green-700">File loaded: {csvFile.name}</span>
+                                </div>
+                            )}
+                        </div>
 
-                {step === 3 && (
-                    <ColumnMappingStep
-                        config={config}
-                        setConfig={setConfig}
-                        csvHeaders={csvHeaders}
-                        onBack={() => handleNavigationAttempt(2) && setStep(2)}
-                        onSubmit={handleSubmit}
-                        loading={loading}
-                    />
-                )}
-            </div>
+                        {/* CSV Columns Display */}
+                        {csvHeaders.length > 0 && (
+                            <div className="mt-6">
+                                <div
+                                    className="flex justify-between items-center cursor-pointer"
+                                    onClick={() => setShowColumns(!showColumns)}
+                                >
+                                    <h3 className="text-sm font-medium text-gray-700">Loaded CSV Columns</h3>
+                                    {showColumns ? <ChevronUp className="h-4 w-4 text-gray-500" /> : <ChevronDown className="h-4 w-4 text-gray-500" />}
+                                </div>
+                                {showColumns && (
+                                    <div className="mt-4 grid grid-cols-2 gap-2">
+                                        {csvHeaders.map((header, index) => (
+                                            <div key={index} className="p-2 bg-gray-50 rounded-lg text-sm text-gray-700">
+                                                {header}
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        )}
 
-            {trainingStatus && (
-                <div className="border rounded-lg p-6 space-y-4">
-                    <div className="flex items-center justify-between">
-                        <h3 className="font-semibold">Training Status</h3>
-                        <span className="capitalize">{trainingStatus.status}</span>
+                        {/* Column Mapping */}
+                        {csvHeaders.length > 0 && (
+                            <div className="mt-6">
+                                <h3 className="text-sm font-medium text-gray-700 mb-4">Column Mapping</h3>
+                                <div className="grid gap-4">
+                                    {["id", "name", "description", "category"].map((field) => (
+                                        <div key={field}>
+                                            <label className="block text-sm font-medium text-gray-700 mb-2">
+                                                {field.charAt(0).toUpperCase() + field.slice(1)} Column
+                                            </label>
+                                            <select
+                                                value={config.schema_mapping[`${field}_column`]}
+                                                onChange={(e) => setConfig(prev => ({
+                                                    ...prev,
+                                                    schema_mapping: {
+                                                        ...prev.schema_mapping,
+                                                        [`${field}_column`]: e.target.value
+                                                    }
+                                                }))}
+                                                className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                            >
+                                                <option value="">Select column</option>
+                                                {csvHeaders.map(header => (
+                                                    <option key={header} value={header}>{header}</option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                    ))}
+                                </div>
+
+                                {/* Custom Columns */}
+                                <div className="mt-6 border border-gray-200 rounded-lg p-4 space-y-4">
+                                    <div className="flex justify-between items-center">
+                                        <h3 className="text-sm font-medium text-gray-700">Custom Columns</h3>
+                                        <button
+                                            onClick={() => setConfig(prev => ({
+                                                ...prev,
+                                                schema_mapping: {
+                                                    ...prev.schema_mapping,
+                                                    custom_columns: [
+                                                        ...prev.schema_mapping.custom_columns,
+                                                        { user_column: "", standard_column: "", role: "metadata" }
+                                                    ]
+                                                }
+                                            }))}
+                                            className="px-3 py-1 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
+                                        >
+                                            Add Column
+                                        </button>
+                                    </div>
+
+                                    {config.schema_mapping.custom_columns.map((col, index) => (
+                                        <div key={index} className="flex gap-2 items-center">
+                                            <select
+                                                value={col.user_column}
+                                                onChange={(e) => {
+                                                    const newColumns = [...config.schema_mapping.custom_columns];
+                                                    newColumns[index].user_column = e.target.value;
+                                                    setConfig(prev => ({
+                                                        ...prev,
+                                                        schema_mapping: {
+                                                            ...prev.schema_mapping,
+                                                            custom_columns: newColumns
+                                                        }
+                                                    }));
+                                                }}
+                                                className="flex-1 p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                            >
+                                                <option value="">Select column</option>
+                                                {csvHeaders.map(header => (
+                                                    <option key={header} value={header}>{header}</option>
+                                                ))}
+                                            </select>
+                                            <input
+                                                type="text"
+                                                placeholder="Standard name"
+                                                value={col.standard_column}
+                                                onChange={(e) => {
+                                                    const newColumns = [...config.schema_mapping.custom_columns];
+                                                    newColumns[index].standard_column = e.target.value;
+                                                    setConfig(prev => ({
+                                                        ...prev,
+                                                        schema_mapping: {
+                                                            ...prev.schema_mapping,
+                                                            custom_columns: newColumns
+                                                        }
+                                                    }));
+                                                }}
+                                                className="flex-1 p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                            />
+                                            <select
+                                                value={col.role}
+                                                onChange={(e) => {
+                                                    const newColumns = [...config.schema_mapping.custom_columns];
+                                                    newColumns[index].role = e.target.value;
+                                                    setConfig(prev => ({
+                                                        ...prev,
+                                                        schema_mapping: {
+                                                            ...prev.schema_mapping,
+                                                            custom_columns: newColumns
+                                                        }
+                                                    }));
+                                                }}
+                                                className="w-32 p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                            >
+                                                <option value="metadata">Metadata</option>
+                                                <option value="training">Training</option>
+                                            </select>
+                                            <button
+                                                onClick={() => {
+                                                    const newColumns = config.schema_mapping.custom_columns.filter((_, i) => i !== index);
+                                                    setConfig(prev => ({
+                                                        ...prev,
+                                                        schema_mapping: {
+                                                            ...prev.schema_mapping,
+                                                            custom_columns: newColumns
+                                                        }
+                                                    }));
+                                                }}
+                                                className="p-2 text-red-500 hover:text-red-600"
+                                            >
+                                                <XCircle className="h-4 w-4" />
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Submit Button */}
+                        <div className="mt-6">
+                            <button
+                                onClick={handleSubmit}
+                                disabled={isSubmitting || !csvFile}
+                                className="w-full px-4 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center"
+                            >
+                                {isSubmitting ? (
+                                    <>
+                                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                        Processing...
+                                    </>
+                                ) : (
+                                    "Start Training"
+                                )}
+                            </button>
+                        </div>
                     </div>
+                </div>
 
-                    <div className="relative w-full h-2 bg-gray-200 rounded-full overflow-hidden">
-                        <div
-                            className="absolute top-0 left-0 h-full bg-blue-500 transition-all duration-300"
-                            style={{
-                                width: `${trainingStatus.status === 'completed' ? 100 :
-                                    trainingStatus.status === 'failed' ? 0 :
-                                        trainingStatus.progress || 50}%`
-                            }}
+                {/* Right Column - Models */}
+                <div className="space-y-6">
+                    {/* Available Models */}
+                    <div className="bg-white border border-gray-200 rounded-lg shadow-sm p-6">
+                        <h2 className="text-xl font-semibold text-gray-900 mb-6">Available Models</h2>
+                        <ModelList
+                            onSelect={setSelectedConfigId}
+                            selectedConfigId={selectedConfigId}
                         />
                     </div>
+                </div>
+            </div>
 
-                    {trainingStatus.error && (
-                        <p className="text-sm text-red-500">{trainingStatus.error}</p>
-                    )}
+            {/* Training Status */}
+            {configId && trainingStatus && (
+                <div className="bg-white border border-gray-200 rounded-lg shadow-sm p-6 mt-6">
+                    <div className="flex items-center justify-between mb-4">
+                        <h2 className="text-xl font-semibold text-gray-900">Training Status</h2>
+                        <StatusBadge status={trainingStatus.status} />
+                    </div>
+                    <div className="space-y-2">
+                        <div className="text-sm text-gray-600">
+                            {trainingStatus.status === ModelStatus.COMPLETED && "Training completed successfully"}
+                            {trainingStatus.status === ModelStatus.PROCESSING && "Training in progress..."}
+                            {trainingStatus.status === ModelStatus.FAILED && (
+                                <div className="text-red-500">
+                                    Training failed: {trainingStatus.error}
+                                </div>
+                            )}
+                        </div>
+                        {trainingStatus.training_stats && (
+                            <div className="text-sm text-gray-600">
+                                <div>Processed Records: {trainingStatus.training_stats.processed_records}</div>
+                                {trainingStatus.training_stats.training_accuracy && (
+                                    <div>Training Accuracy: {(trainingStatus.training_stats.training_accuracy * 100).toFixed(2)}%</div>
+                                )}
+                                {trainingStatus.training_stats.progress && (
+                                    <div className="relative pt-1">
+                                        <div className="overflow-hidden h-2 text-xs flex rounded bg-blue-200">
+                                            <div
+                                                style={{ width: `${trainingStatus.training_stats.progress}%` }}
+                                                className="shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center bg-blue-500"
+                                            />
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
                 </div>
             )}
-
-            {searchResults.length > 0 && <SearchResults results={searchResults} />}
         </div>
     );
 }

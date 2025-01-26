@@ -1,5 +1,20 @@
 version: '3.8'
 
+x-common-variables: &common-variables
+  PYTHONUNBUFFERED: 1
+  REDIS_HOST: redis
+  REDIS_PORT: 6379
+  AWS_ACCESS_KEY: ${AWS_ACCESS_KEY}
+  AWS_SECRET_KEY: ${AWS_SECRET_KEY}
+  S3_BUCKET: ${S3_BUCKET}
+  AWS_REGION: ${AWS_REGION}
+  AWS_ENDPOINT_URL: http://localstack:4566
+
+x-common-build: &common-build
+  args:
+    PYTHON_VERSION: 3.9
+    BUILD_TYPE: cpu
+
 services:
   api:
     build:
@@ -8,71 +23,85 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - MONGO_URI=mongodb://root:example@mongo:27017
-      - SEARCH_SERVICE_HOST=http://search-service:5000
-      - TRAINING_SERVICE_HOST=http://training-service:5001
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-    volumes:
-      - data:/app/data:rw
-      - models:/app/models:rw
+      <<: *common-variables
+      MONGO_URI: mongodb://root:example@mongo:27017
+      SEARCH_SERVICE_HOST: http://search-service:5000
+      TRAINING_SERVICE_HOST: http://training-service:5001
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     depends_on:
       - mongo
       - redis
       - search-service
       - training-service
+    networks:
+      - app-network
 
   search-service:
     build:
+      <<: *common-build
       context: ./trainer
       dockerfile: Dockerfile.python
       args:
-        BUILD_TYPE: cpu
+        PYTORCH_INDEX: ${PYTORCH_INDEX:-https://download.pytorch.org/whl/cpu}
     ports:
       - "5000:5000"
     environment:
-      - PYTHONUNBUFFERED=1
-      - PYTHONPATH=/app
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - SERVICE_PORT=5000
-      - BATCH_SIZE=32
-    volumes:
-      - data:/app/data:rw
-      - models:/app/models:rw
+      <<: *common-variables
+      SERVICE_PORT: 5000
+    command: ["python", "search_service.py"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     depends_on:
       - redis
-    command: ["python", "search_service.py"]
+    networks:
+      - app-network
 
   training-service:
     build:
+      <<: *common-build
       context: ./trainer
       dockerfile: Dockerfile.python
       args:
-        BUILD_TYPE: cpu
+        PYTORCH_INDEX: ${PYTORCH_INDEX:-https://download.pytorch.org/whl/cpu}
     ports:
       - "5001:5001"
     environment:
-      - PYTHONUNBUFFERED=1
-      - PYTHONPATH=/app
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - SERVICE_PORT=5001
-      - TRAINING_QUEUE=training_queue
-      - MODEL_PREFIX=model_status
-    volumes:
-      - data:/app/data:rw
-      - models:/app/models:rw
+      <<: *common-variables
+      SERVICE_PORT: 5001
+      TRAINING_QUEUE: training_queue
+      MODEL_PREFIX: model_status
+    command: ["python", "training_service.py"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     depends_on:
       - redis
-    command: ["python", "training_service.py"]
+    networks:
+      - app-network
 
   redis:
-    image: redis:alpine
+    image: redis:7-alpine
     ports:
       - "6379:6379"
+    command: redis-server --appendonly yes
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - app-network
 
   mongo:
     image: mongo:latest
@@ -83,9 +112,39 @@ services:
       MONGO_INITDB_ROOT_PASSWORD: example
     volumes:
       - mongodb_data:/data/db
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - app-network
+
+  localstack:
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3
+      - AWS_DEFAULT_REGION=us-east-1
+      - EDGE_PORT=4566
+      - DEBUG=1
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "${LOCALSTACK_VOLUME_DIR:-./volume}:/var/lib/localstack"
+      - ./localstack/init-s3.sh:/docker-entrypoint-initaws.d/init-s3.sh
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - app-network
 
 volumes:
   mongodb_data:
-  data:
-  models:
   redis_data:
+  localstack_data:
+
+networks:
+  app-network:
