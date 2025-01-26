@@ -79,7 +79,7 @@ cp .env.example .env
 ```
 
 Required environment variables:
-```env
+```bash
 # API Service
 MONGO_URI=mongodb://root:example@localhost:27017
 REDIS_HOST=localhost
@@ -148,7 +148,7 @@ npm run dev
 ### Training Management
 
 - `GET /training/status/:id` - Get training progress
-- `GET /jobs/queue` - View queued training jobs
+- `GET /queue` - View queued training jobs
 
 ### Search
 
@@ -227,34 +227,10 @@ npm run dev
 }
 ```
 
-## 🔍 Development
-
-### Adding New Features
-
-1. Create feature branch:
-```bash
-git checkout -b feature/new-feature
-```
-
-2. Make changes and test
-3. Submit pull request
-
-### Running Tests
-```bash
-# API Tests
-cd api && go test ./...
-
-# Training Service Tests
-cd trainer && python -m pytest
-
-# Search Service Tests
-cd search && python -m pytest
-```
-
 ## 📊 Monitoring
 
 - Check training progress: `/training/status/:id`
-- Monitor queue: `/jobs/queue`
+- Monitor queue: `/queue`
 - View model performance: Model info panel in UI
 
 ## 🔒 Security Considerations
