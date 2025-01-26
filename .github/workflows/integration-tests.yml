@@ -28,6 +28,15 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v2
 
+    - name: Set up Docker Compose
+      run: |
+        # Download and install Docker Compose v2
+        DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker}
+        mkdir -p $DOCKER_CONFIG/cli-plugins
+        curl -SL https://github.com/docker/compose/releases/download/v2.17.2/docker-compose-linux-x86_64 -o $DOCKER_CONFIG/cli-plugins/docker-compose
+        chmod +x $DOCKER_CONFIG/cli-plugins/docker-compose
+        docker compose version
+
     - name: Set up Node.js
       uses: actions/setup-node@v3
       with:
@@ -51,7 +60,11 @@ jobs:
 
     - name: Start services
       run: |
-        docker-compose up -d
+        # Make LocalStack init script executable
+        chmod +x localstack/init-s3.sh
+        
+        # Start services using Docker Compose v2
+        docker compose up -d
         echo "Waiting for services to be healthy..."
         
         # Function to check service health
@@ -61,7 +74,7 @@ jobs:
           local attempt=1
           
           while [ $attempt -le $max_attempts ]; do
-            if docker-compose ps "$service" | grep -q "healthy"; then
+            if docker compose ps "$service" | grep -q "healthy"; then
               echo "✓ $service is healthy"
               return 0
             fi
@@ -71,7 +84,7 @@ jobs:
           done
           
           echo "❌ $service failed to become healthy"
-          docker-compose logs "$service"
+          docker compose logs "$service"
           return 1
         }
         
@@ -80,7 +93,7 @@ jobs:
         for service in "${services[@]}"; do
           if ! check_health "$service" 12; then
             echo "Service startup failed"
-            docker-compose logs
+            docker compose logs
             exit 1
           fi
         done
@@ -89,6 +102,16 @@ jobs:
       run: |
         echo "Waiting for LocalStack to be ready..."
         timeout 60s bash -c 'until curl -s http://localhost:4566/_localstack/health | grep -q "\"s3\": \"running\""; do sleep 1; done'
+        
+        # Install AWS CLI v2
+        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+        unzip awscliv2.zip
+        sudo ./aws/install
+        
+        # Configure AWS CLI for LocalStack
+        aws configure set aws_access_key_id test
+        aws configure set aws_secret_access_key test
+        aws configure set region us-east-1
         
         # Create S3 bucket using AWS CLI with LocalStack endpoint
         aws --endpoint-url=http://localhost:4566 \
@@ -116,7 +139,7 @@ jobs:
         services=("api" "search-service" "training-service" "redis" "mongo" "localstack")
         for service in "${services[@]}"; do
           echo "=== $service Logs ===" > "logs/$service.log"
-          docker-compose logs "$service" >> "logs/$service.log" 2>&1
+          docker compose logs "$service" >> "logs/$service.log" 2>&1
         done
         
         # Create summary log
@@ -133,4 +156,4 @@ jobs:
     - name: Cleanup
       if: always()
       run: |
-        docker-compose down -v
+        docker compose down -v
