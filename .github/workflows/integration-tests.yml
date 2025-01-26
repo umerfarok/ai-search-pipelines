@@ -99,10 +99,7 @@ jobs:
         done
 
     - name: Initialize LocalStack S3
-      run: |
-        echo "Waiting for LocalStack to be ready..."
-        timeout 60s bash -c 'until curl -s http://localhost:4566/_localstack/health | grep -q "\"s3\": \"running\""; do sleep 1; done'
-        
+      run: |        
         # Install AWS CLI v2
         curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
         unzip awscliv2.zip
