@@ -1,0 +1,106 @@
+# Version control
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env
+pip-log.txt
+pip-delete-this-directory.txt
+.tox
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+
+# Virtual environment
+venv
+ENV
+env.bak
+venv.bak
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# Project specific
+*.csv
+*.json
+*.npy
+*.pt
+models/
+data/
+temp/
+logs/
+tests/
+# Version control
+.git
+.gitignore
+.github
+
+# Development and IDE files
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# Go specific
+*.test
+*.out
+/vendor
+__debug_bin
+
+# Local development files
+*.env
+.env.local
+.env.*.local
+*.log
+
+# Build artifacts
+/build
+/dist
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Project specific
+/data
+/models
+/playground
+/volume
+/node_modules
+/localstack
+
+# Documentation
+*.md
+LICENSE
+CHANGELOG
+README.md
+
+# Docker related
+docker-compose*.yml
+Dockerfile*
+.docker
+
+# Testing
+*_test.go
+test-flow.js
+
+# Temporary files
+*.tmp
+.DS_Store
+
+# Exclude all logs
+*.log

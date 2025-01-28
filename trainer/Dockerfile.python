@@ -24,8 +24,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
     PIP_NO_CACHE_DIR=1 \
-    PIP_RETRIES=10 \
-    PIP_TIMEOUT=100 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_DEFAULT_TIMEOUT=100
 
 FROM base as builder
@@ -36,10 +35,11 @@ ARG PYTORCH_INDEX
 # Copy requirements first for better caching
 COPY requirements.txt .
 
-# Install dependencies with retry logic and increased timeout
+# Clean install dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir torch --index-url ${PYTORCH_INDEX} --timeout 100 && \
-    pip install --no-cache-dir -r requirements.txt --timeout 100
+    pip uninstall -y torch sentence-transformers transformers huggingface-hub && \
+    pip install --no-cache-dir torch --index-url ${PYTORCH_INDEX} && \
+    pip install --no-cache-dir -r requirements.txt
 
 FROM builder as dev
 
@@ -56,4 +56,3 @@ USER appuser
 
 # Default command (will be overridden by docker-compose)
 CMD ["python", "app.py"]
-
