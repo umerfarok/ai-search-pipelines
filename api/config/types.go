@@ -98,7 +98,7 @@ type SearchResult struct {
 	Category    string                 `json:"category"`
 	Score       float64                `json:"score"`
 	Metadata    map[string]interface{} `json:"metadata,omitempty"`
-}
+} 
 
 type SearchResponse struct {
 	Results    []SearchResult `json:"results"`

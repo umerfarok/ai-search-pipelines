@@ -113,7 +113,7 @@ func main() {
 	}
 
 	// Initialize MongoDB
-	db, err := initMongoDB()
+	db, err := initMongoDB() 
 	if err != nil {
 		log.Fatalf("Failed to connect to MongoDB: %v", err)
 	}

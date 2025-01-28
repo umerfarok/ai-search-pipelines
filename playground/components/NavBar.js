@@ -12,6 +12,7 @@ export default function NavBar() {
         { href: '/search', label: 'Search Models', icon: Search },
         { href: '/create-config', label: 'Create Config', icon: Plus },
         { href: '/pending-jobs', label: 'Pending Jobs', icon: Clock },
+        { href: '/append-products', label: 'Append Products', icon: Plus },
     ];
 
     const isActive = (path) => router.pathname === path;
@@ -24,7 +25,7 @@ export default function NavBar() {
                     <div className="flex items-center">
                         <Link href="/" 
                             className="flex items-center text-white font-bold text-xl">
-                            AI Search
+                            PlayGround
                         </Link>
                     </div>
 
