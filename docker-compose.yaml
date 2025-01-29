@@ -1,4 +1,3 @@
-version: '3.3'
 
 x-common-variables: &common-variables
   PYTHONUNBUFFERED: 1
