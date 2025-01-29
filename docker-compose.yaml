@@ -1,4 +1,3 @@
-
 x-common-variables: &common-variables
   PYTHONUNBUFFERED: 1
   REDIS_HOST: redis
@@ -51,7 +50,7 @@ services:
       context: ./trainer
       dockerfile: Dockerfile.python
       args:
-        PYTORCH_INDEX: ${PYTORCH_INDEX:-https://download.pytorch.org/whl/cpu}
+        PYTORCH_INDEX: "https://download.pytorch.org/whl/cu118"
         BASE_IMAGE: ml-base:latest
     image: search-service:latest
     ports:
@@ -89,7 +88,7 @@ services:
       context: ./trainer
       dockerfile: Dockerfile.python
       args:
-        PYTORCH_INDEX: ${PYTORCH_INDEX:-https://download.pytorch.org/whl/cpu}
+        PYTORCH_INDEX: "https://download.pytorch.org/whl/cu118"
         BASE_IMAGE: ml-base:latest
     image: training-service:latest
     ports:
