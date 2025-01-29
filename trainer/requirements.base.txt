@@ -1,0 +1,14 @@
+--extra-index-url https://download.pytorch.org/whl/cu118
+
+# Core ML packages
+torch>=2.0.1
+transformers>=4.34.0
+sentence-transformers>=2.2.0
+bitsandbytes==0.41.1
+accelerate==0.26.0
+einops>=0.6.1  # Required by some transformer models
+
+# Additional ML tools
+numpy>=1.21.0
+pandas>=1.3.0
+scikit-learn>=1.0.0

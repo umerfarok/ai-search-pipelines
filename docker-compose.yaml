@@ -13,7 +13,7 @@ x-common-variables: &common-variables
 x-common-build: &common-build
   args:
     PYTHON_VERSION: 3.9
-    BUILD_TYPE: cpu
+    BUILD_TYPE: gpu
 
 services:
   api:
@@ -40,6 +40,12 @@ services:
     networks:
       - app-network
 
+  ml-base:
+    build:
+      context: ./trainer
+      dockerfile: Dockerfile.base
+    image: ml-base:latest
+
   search-service:
     build:
       <<: *common-build
@@ -47,11 +53,16 @@ services:
       dockerfile: Dockerfile.python
       args:
         PYTORCH_INDEX: ${PYTORCH_INDEX:-https://download.pytorch.org/whl/cpu}
+        BASE_IMAGE: ml-base:latest
+    image: search-service:latest
     ports:
       - "5000:5000"
     environment:
       <<: *common-variables
       SERVICE_PORT: 5000
+      NVIDIA_VISIBLE_DEVICES: all
+      CUDA_VISIBLE_DEVICES: 0
+      MODEL_CACHE_DIR: /app/model_cache
     command: ["python", "search_service.py"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
@@ -60,16 +71,28 @@ services:
       retries: 3
     depends_on:
       - redis
+      - ml-base
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     networks:
       - app-network
+    volumes:
+      - model_cache:/app/model_cache
 
   training-service:
     build:
-      <<: *common-build
+      <<: *common-build 
       context: ./trainer
       dockerfile: Dockerfile.python
       args:
         PYTORCH_INDEX: ${PYTORCH_INDEX:-https://download.pytorch.org/whl/cpu}
+        BASE_IMAGE: ml-base:latest
+    image: training-service:latest
     ports:
       - "5001:5001"
     environment:
@@ -77,6 +100,9 @@ services:
       SERVICE_PORT: 5001
       TRAINING_QUEUE: training_queue
       MODEL_PREFIX: model_status
+      NVIDIA_VISIBLE_DEVICES: all
+      CUDA_VISIBLE_DEVICES: 0
+      MODEL_CACHE_DIR: /app/model_cache
     command: ["python", "training_service.py"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
@@ -85,8 +111,18 @@ services:
       retries: 3
     depends_on:
       - redis
+      - ml-base
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     networks:
       - app-network
+    volumes:
+      - model_cache:/app/model_cache
 
   redis:
     image: redis:7-alpine
@@ -129,10 +165,12 @@ services:
       - AWS_DEFAULT_REGION=us-east-1
       - EDGE_PORT=4566
       - DEBUG=1
+      - PERSISTENCE=1
+      - DATA_DIR=/var/lib/localstack/data
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock"
-      - "${LOCALSTACK_VOLUME_DIR:-./volume}:/var/lib/localstack"
-      - ./localstack/init-s3.sh:/docker-entrypoint-initaws.d/init-s3.sh
+      - "localstack_data:/var/lib/localstack"
+      - "./localstack/init-s3.sh:/docker-entrypoint-initaws.d/init-s3.sh"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
       interval: 30s
@@ -145,6 +183,8 @@ volumes:
   mongodb_data:
   redis_data:
   localstack_data:
+  model_cache:
+    driver: local
 
 networks:
   app-network:

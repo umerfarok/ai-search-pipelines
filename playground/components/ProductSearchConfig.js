@@ -22,6 +22,21 @@ const ModelStatus = {
     CANCELED: "canceled",
 };
 
+const AVAILABLE_LLM_MODELS = {
+    "deepseek-coder": {
+        name: "DeepSeek Coder 1.3B",
+        description: "Code-optimized model for technical content"
+    },
+    "gpt2": {
+        name: "GPT-2",
+        description: "General purpose language model"
+    },
+    "opt-350m": {
+        name: "OPT 350M",
+        description: "Compact language model for general text"
+    }
+};
+
 const useModelConfig = () => {
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [error, setError] = useState("");
@@ -52,6 +67,7 @@ const useModelConfig = () => {
             max_tokens: 512,
             validation_split: 0.2,
             training_params: {},
+            llm_model: "deepseek-coder", // Add default model
         },
     });
 
@@ -305,6 +321,21 @@ export default function ProductSearchConfig() {
     const [selectedConfigId, setSelectedConfigId] = useState(null);
     const [csvFile, setCsvFile] = useState(null);
     const [showColumns, setShowColumns] = useState(false);
+    const [availableModels, setAvailableModels] = useState([]);
+
+    useEffect(() => {
+        const fetchModels = async () => {
+            try {
+                const response = await fetch(`${API_BASE_URL}/config/llm-models`);
+                if (!response.ok) throw new Error("Failed to fetch models");
+                const data = await response.json();
+                setAvailableModels(data.models);
+            } catch (err) {
+                console.error("Failed to fetch available models:", err);
+            }
+        };
+        fetchModels();
+    }, []);
 
     const handleFileUploadWrapper = (e) => {
         const file = e.target.files?.[0];
@@ -539,7 +570,7 @@ export default function ProductSearchConfig() {
                                                     const newColumns = [...config.schema_mapping.custom_columns];
                                                     newColumns[index].standard_column = e.target.value;
                                                     setConfig(prev => ({
-                                                        ...prev,
+                                                        ...prev, 
                                                         schema_mapping: {
                                                             ...prev.schema_mapping,
                                                             custom_columns: newColumns
@@ -586,6 +617,33 @@ export default function ProductSearchConfig() {
                                 </div>
                             </div>
                         )}
+
+                        {/* Training Configuration */}
+                        <div className="mt-6">
+                            <h3 className="text-sm font-medium text-gray-700 mb-4">Training Configuration</h3>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">
+                                    LLM Model for Fine-tuning
+                                </label>
+                                <select
+                                    value={config.training_config?.llm_model || "deepseek-coder"}
+                                    onChange={(e) => setConfig(prev => ({
+                                        ...prev,
+                                        training_config: {
+                                            ...prev.training_config,
+                                            llm_model: e.target.value
+                                        }
+                                    }))}
+                                    className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                >
+                                    {Object.entries(AVAILABLE_LLM_MODELS).map(([key, model]) => (
+                                        <option key={key} value={key}>
+                                            {model.name} - {model.description}
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
+                        </div>
 
                         {/* Submit Button */}
                         <div className="mt-6">
@@ -652,6 +710,14 @@ export default function ProductSearchConfig() {
                                             />
                                         </div>
                                     </div>
+                                )}
+                            </div>
+                        )}
+                        {trainingStatus && trainingStatus.llm_model && (
+                            <div className="mt-2 text-sm text-gray-600">
+                                <div>Fine-tuned Model: {AVAILABLE_LLM_MODELS[trainingStatus.llm_model]?.name}</div>
+                                {trainingStatus.completed_at && (
+                                    <div>Completed at: {new Date(trainingStatus.completed_at).toLocaleString()}</div>
                                 )}
                             </div>
                         )}

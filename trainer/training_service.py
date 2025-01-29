@@ -13,12 +13,13 @@ import time
 import threading
 from typing import Dict, List, Optional, Union
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError 
 from botocore.config import Config
 import requests
-import io
+import io 
 from enum import Enum
-
+from transformers import AutoTokenizer, AutoModelForCausalLM
+ 
 
 class ModelStatus(Enum):
     PENDING = "pending"
@@ -44,7 +45,6 @@ class AppConfig:
     TRAINING_QUEUE = "training_queue"  # Queue name for training jobs
     MODEL_STATUS_PREFIX = "model_status:"
     SERVICE_PORT = int(os.getenv("SERVICE_PORT", 5001))
-    MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
     BATCH_SIZE = int(os.getenv("BATCH_SIZE", 128))
     AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY")
     AWS_SECRET_KEY = os.getenv("AWS_SECRET_KEY")
@@ -53,6 +53,20 @@ class AppConfig:
     API_HOST = os.getenv("API_HOST", "http://api:8080")
     AWS_SSL_VERIFY = os.getenv("AWS_SSL_VERIFY", "true")
     AWS_ENDPOINT_URL = os.getenv("AWS_ENDPOINT_URL")
+    DEFAULT_MODEL = "deepseek-coder"
+    AVAILABLE_LLM_MODELS = {
+        "deepseek-coder": {
+            "name": "deepseek-ai/deepseek-coder-1.3b-base",
+            "description": "Code-optimized model for technical content and embeddings"
+        }
+    }
+    MODEL_CACHE_DIR = os.getenv("MODEL_CACHE_DIR", "/tmp/model_cache")
+    
+    @classmethod
+    def get_cache_path(cls, model_path: str) -> str:
+        """Get cached model path"""
+        safe_path = model_path.replace("/", "_").replace("\\", "_")
+        return os.path.join(cls.MODEL_CACHE_DIR, safe_path)
 
 
 class S3Manager:
@@ -137,25 +151,182 @@ class RedisManager:
             logger.error(f"Error updating Redis status: {e}")
 
 
+class LLMTrainer:
+    def __init__(self):
+        self.model_name = None
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.training_args = {
+            "num_train_epochs": 3,
+            "learning_rate": 2e-5,
+            "batch_size": 4,
+            "gradient_accumulation_steps": 4,
+            "max_steps": 1000
+        }
+        self.model = None
+        self.tokenizer = None
+
+    def initialize_model(self, model_key):
+        """Initialize the model based on the selected key"""
+        try:
+            if model_key not in AppConfig.AVAILABLE_LLM_MODELS:
+                raise ValueError(f"Invalid model key: {model_key}")
+            
+            self.model_name = AppConfig.AVAILABLE_LLM_MODELS[model_key]["name"]
+            logger.info(f"Loading LLM model: {self.model_name}")
+
+            # Initialize tokenizer and model
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.model_name,
+                trust_remote_code=True,
+                use_fast=True
+            )
+            
+            model_kwargs = {
+                "trust_remote_code": True,
+                "device_map": "auto",
+                "torch_dtype": torch.float16 if torch.cuda.is_available() else torch.float32,
+                "output_attentions": False,
+                "output_hidden_states": True,  # Always output hidden states
+                "return_dict": False  # Return tuple instead of CausalLMOutputWithPast
+            }
+            
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_name,
+                **model_kwargs
+            )
+            
+            logger.info(f"Successfully loaded LLM model and tokenizer")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error initializing LLM model: {e}")
+            raise
+
+    def fine_tune(self, training_data: List[Dict], output_dir: str):
+        """Fine-tune the LLM model"""
+        try:
+            if self.model is None or self.tokenizer is None:
+                raise ValueError("Model or tokenizer not initialized")
+
+            logger.info(f"Starting LLM fine-tuning with {len(training_data)} samples")
+            
+            # Create dataset
+            dataset = self._prepare_dataset(training_data)
+            
+            from transformers import (
+                TrainingArguments,
+                Trainer,
+                DataCollatorForLanguageModeling
+            )
+
+            # Training arguments
+            training_args = TrainingArguments(
+                output_dir=output_dir,
+                num_train_epochs=self.training_args["num_train_epochs"],
+                per_device_train_batch_size=self.training_args["batch_size"],
+                gradient_accumulation_steps=self.training_args["gradient_accumulation_steps"],
+                learning_rate=self.training_args["learning_rate"],
+                max_steps=self.training_args["max_steps"],
+                logging_steps=10,
+                save_steps=200,
+                save_total_limit=2,
+                remove_unused_columns=False,
+                push_to_hub=False,
+                report_to="none"
+            )
+
+            # Initialize trainer
+            trainer = Trainer(
+                model=self.model,
+                args=training_args,
+                train_dataset=dataset,
+                data_collator=DataCollatorForLanguageModeling(self.tokenizer, mlm=False),
+            )
+
+            # Train
+            logger.info("Starting trainer.train()")
+            trainer.train()
+            logger.info("Completed trainer.train()")
+
+            # Save model
+            logger.info(f"Saving fine-tuned model to {output_dir}")
+            self.model.save_pretrained(output_dir)
+            self.tokenizer.save_pretrained(output_dir)
+            
+            # Save model info
+            model_info = {
+                "model_type": "llm",
+                "base_model": self.model_name,
+                "version": datetime.now().strftime("%Y%m%d_%H%M%S"),
+                "fine_tuned": True
+            }
+            
+            with open(f"{output_dir}/model_info.json", "w") as f:
+                json.dump(model_info, f)
+
+            return True
+            
+        except Exception as e:
+            logger.error(f"LLM fine-tuning error: {str(e)}")
+            raise
+
+    def _prepare_dataset(self, training_data: List[Dict]):
+        """Prepare dataset for training"""
+        try:
+            prompt_template = """### Query: {query}
+### Context: {context}
+### Response: {response}
+"""
+            texts = [
+                prompt_template.format(**item)
+                for item in training_data
+            ]
+            
+            encodings = self.tokenizer(
+                texts,
+                truncation=True,
+                padding=True,
+                max_length=512,
+                return_tensors="pt"
+            )
+
+            # Create proper dataset
+            import torch
+            dataset = torch.utils.data.TensorDataset(
+                encodings["input_ids"],
+                encodings["attention_mask"]
+            )
+            
+            return dataset
+            
+        except Exception as e:
+            logger.error(f"Error preparing dataset: {e}")
+            raise
+
+
 class ModelTrainer:
     def __init__(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info(f"Using device: {self.device}")
-        self.model = SentenceTransformer(AppConfig.MODEL_NAME)
-        self.model.to(self.device)
         self.redis_manager = RedisManager()
         self.s3_manager = S3Manager()
+        self.llm_trainer = LLMTrainer()
 
     def update_api_status(
-        self, config_id: str, status: str, progress: float = None, error: str = None
+        self, config_id: str, status: str, progress: float = None, error: str = None, model_info: dict = None
     ):
-        """Update status via API endpoint"""
+        """Update status via API endpoint with additional model information"""
         try:
-            update_data = {"status": status, "updated_at": datetime.now().isoformat()}
+            update_data = {
+                "status": status,
+                "updated_at": datetime.now().isoformat()
+            }
             if progress is not None:
                 update_data["progress"] = progress
             if error:
                 update_data["error"] = error
+            if model_info:
+                update_data.update(model_info)
 
             url = f"{AppConfig.API_HOST}/config/status/{config_id}"
             response = requests.put(url, json=update_data, timeout=5)
@@ -193,26 +364,38 @@ class ModelTrainer:
             logger.error(f"Error processing training data: {e}")
             raise
 
-    def _generate_embeddings(
-        self, texts: List[str], batch_size: int = 32
-    ) -> np.ndarray:
+    def _generate_embeddings(self, texts: List[str], model: LLMTrainer) -> np.ndarray:
+        """Generate embeddings using DeepSeek model"""
         try:
-            batch_size = int(batch_size)
-            logger.info(
-                f"Generating embeddings for {len(texts)} texts with batch size {batch_size}"
-            )
-
-            embeddings = self.model.encode(
-                texts,
-                batch_size=batch_size,
-                show_progress_bar=True,
-                convert_to_tensor=True,
-                normalize_embeddings=True,
-            )
-
-            embeddings_numpy = embeddings.cpu().numpy()
-            logger.info(f"Generated embeddings with shape: {embeddings_numpy.shape}")
-            return embeddings_numpy
+            logger.info(f"Generating embeddings for {len(texts)} texts")
+            embeddings = []
+            
+            # Process in batches
+            batch_size = 32
+            for i in range(0, len(texts), batch_size):
+                batch = texts[i:i + batch_size]
+                inputs = model.tokenizer(batch, padding=True, truncation=True, 
+                                      return_tensors="pt", max_length=512)
+                inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                
+                with torch.no_grad():
+                    # Get hidden states from base model instead of CausalLM output
+                    outputs = model.model(
+                        **inputs,
+                        output_hidden_states=True  # Request hidden states
+                    )
+                    # Use the last layer's hidden states
+                    hidden_states = outputs.hidden_states[-1]  # Get last layer
+                    # Mean pool the token embeddings
+                    batch_embeddings = hidden_states.mean(dim=1)
+                    embeddings.append(batch_embeddings.cpu())
+                    
+            embeddings = torch.cat(embeddings, dim=0)
+            # Normalize embeddings
+            embeddings = F.normalize(embeddings, p=2, dim=1)
+            
+            logger.info(f"Generated embeddings with shape: {embeddings.shape}")
+            return embeddings.numpy()
 
         except Exception as e:
             logger.error(f"Error generating embeddings: {e}")
@@ -220,6 +403,8 @@ class ModelTrainer:
 
     def _load_data(self, config: Dict) -> pd.DataFrame:
         try:
+            data_source = config["data_source"]
+            current_file = data_source["location"]
             data_source = config["data_source"]
             current_file = data_source["location"]
 
@@ -253,55 +438,35 @@ class ModelTrainer:
             raise
 
     def _save_artifacts(
-        self, df: pd.DataFrame, texts: List[str], embeddings: np.ndarray, config: Dict
+        self, df: pd.DataFrame, embeddings: np.ndarray, config: Dict
     ) -> bool:
+        """Save model artifacts and metadata"""
         try:
-            model_path = config["model_path"]
-            temp_dir = f"/tmp/training/{model_path}"
-            os.makedirs(temp_dir, exist_ok=True)
-
-            # Save model state
-            model_path = f"{temp_dir}/model.pt"
-            torch.save(self.model.state_dict(), model_path)
-
-            # Save embeddings
-            embeddings_path = f"{temp_dir}/embeddings.npy"
-            np.save(embeddings_path, embeddings)
-
+            temp_dir = f"/tmp/training/{config['model_path']}"
+            
             # Save metadata
             metadata = {
                 "timestamp": datetime.now().isoformat(),
                 "config": config,
-                "num_samples": len(texts),
+                "num_samples": len(df),
                 "embedding_shape": embeddings.shape,
-                "model_name": AppConfig.MODEL_NAME,
-                "columns": df.columns.tolist(),
+                "model_name": AppConfig.AVAILABLE_LLM_MODELS["deepseek-coder"]["name"],
             }
-
-            metadata_path = f"{temp_dir}/metadata.json"
-            with open(metadata_path, "w") as f:
+            
+            with open(f"{temp_dir}/metadata.json", "w") as f:
                 json.dump(metadata, f, indent=2)
-
-            # Save processed products
-            products_path = f"{temp_dir}/products.csv"
-            df.to_csv(products_path, index=False)
-
-            # Upload all artifacts to S3
-            files_to_upload = {
-                "model.pt": model_path,
-                "embeddings.npy": embeddings_path,
-                "metadata.json": metadata_path,
-                "products.csv": products_path,
-            }
-
-            for file_name, local_path in files_to_upload.items():
+                
+            # Save products
+            df.to_csv(f"{temp_dir}/products.csv", index=False)
+            
+            # Upload everything to S3
+            for file_name in ["metadata.json", "products.csv", "embeddings.npy"]:
                 s3_path = f"{config['model_path']}/{file_name}"
-                if not self.s3_manager.upload_file(local_path, s3_path):
+                if not self.s3_manager.upload_file(f"{temp_dir}/{file_name}", s3_path):
                     raise Exception(f"Failed to upload {file_name}")
-
-            logger.info(f"All artifacts saved to S3: {config['model_path']}")
+                    
             return True
-
+            
         except Exception as e:
             logger.error(f"Error saving artifacts: {e}")
             raise
@@ -311,52 +476,52 @@ class ModelTrainer:
         config_id = job["config_id"]
 
         try:
-            # Update status to processing
-            self.update_api_status(config_id, ModelStatus.PROCESSING.value, progress=0)
-            self.redis_manager.update_status(
-                config_id, {"status": ModelStatus.PROCESSING.value, "progress": 0}
-            )
-
+            # Initialize LLM
+            selected_model = "deepseek-coder"  # Using only DeepSeek
+            self.llm_trainer.initialize_model(selected_model)
+            
             # Load and process data
             df = self._load_data(config)
-            logger.info(f"Loaded {len(df)} records")
-            self.update_api_status(config_id, ModelStatus.PROCESSING.value, progress=20)
-
-            # Process training data
             texts = self._process_training_data(df, config)
-            logger.info(f"Processed {len(texts)} text samples")
-            self.update_api_status(config_id, ModelStatus.PROCESSING.value, progress=40)
-
-            # Generate embeddings
-            batch_size = config.get("training_config", {}).get(
-                "batch_size", AppConfig.BATCH_SIZE
-            )
-            embeddings = self._generate_embeddings(texts, batch_size)
-            logger.info(f"Generated embeddings of shape {embeddings.shape}")
-            self.update_api_status(config_id, ModelStatus.PROCESSING.value, progress=80)
-
-            # Save artifacts
-            success = self._save_artifacts(df, texts, embeddings, config)
-
+            
+            # Generate embeddings using the LLM model
+            embeddings = self._generate_embeddings(texts, self.llm_trainer)
+            logger.info(f"Generated embeddings with shape {embeddings.shape}")
+            
+            # Fine-tune the model on product data
+            training_data = self.llm_trainer.prepare_training_data(df, config)
+            
+            # Save everything in one place
+            temp_dir = f"/tmp/training/{config['model_path']}"
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            # Fine-tune and save model
+            self.llm_trainer.fine_tune(training_data, temp_dir)
+            
+            # Save embeddings alongside the model
+            np.save(f"{temp_dir}/embeddings.npy", embeddings)
+            
+            # Save metadata and products
+            success = self._save_artifacts(df, embeddings, config)
+            
             if success:
-                logger.info("Training completed successfully")
-                self.update_api_status(
-                    config_id, ModelStatus.COMPLETED.value, progress=100
-                )
-                self.redis_manager.update_status(
-                    config_id, {"status": ModelStatus.COMPLETED.value, "progress": 100}
-                )
+                model_info = {
+                    "status": ModelStatus.COMPLETED.value,
+                    "progress": 100,
+                    "model": selected_model,
+                    "model_name": AppConfig.AVAILABLE_LLM_MODELS[selected_model]["name"],
+                    "completed_at": datetime.now().isoformat()
+                }
+                self.update_api_status(config_id, ModelStatus.COMPLETED.value, 
+                                     progress=100, model_info=model_info)
                 return True
-            else:
-                raise Exception("Failed to save artifacts")
+
+            return False
 
         except Exception as e:
             error_msg = str(e)
             logger.error(f"Training failed: {error_msg}")
             self.update_api_status(config_id, ModelStatus.FAILED.value, error=error_msg)
-            self.redis_manager.update_status(
-                config_id, {"status": ModelStatus.FAILED.value, "error": error_msg}
-            )
             return False
 
 
@@ -509,6 +674,17 @@ def stop_worker():
     try:
         worker.stop()
         return jsonify({"status": "stopped"})
+    except Exception as e: 
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/models")
+def get_available_models():
+    """Get available LLM models"""
+    try:
+        return jsonify({
+            "models": AppConfig.AVAILABLE_LLM_MODELS
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -536,3 +712,4 @@ if __name__ == "__main__":
         port=port,
         use_reloader=False,  # Disable reloader to prevent multiple worker instances
     )
+

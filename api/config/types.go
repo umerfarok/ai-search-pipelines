@@ -53,6 +53,7 @@ type TrainingConfig struct {
 	EmbeddingModel  string            `json:"embedding_model"`
 	BatchSize       int               `json:"batch_size"`
 	MaxTokens       int               `json:"max_tokens"`
+	LLMModel        string            `json:"llm_model"` // Add this field for LLM model selection
 	TrainingParams  map[string]string `json:"training_params,omitempty"`
 	ValidationSplit float64           `json:"validation_split"`
 }
@@ -82,6 +83,9 @@ type TrainingStats struct {
 	ValidationScore  float64 `json:"validation_score,omitempty"`
 	ErrorRate        float64 `json:"error_rate,omitempty"`
 	Progress         float64 `json:"progress"`
+	LLMModel         string  `json:"llm_model,omitempty"`         // Add this field
+	LLMModelName     string  `json:"llm_model_name,omitempty"`    // Add this field
+	CompletedAt      string  `json:"completed_at,omitempty"`      // Add this field
 }
 
 type SearchRequest struct {
@@ -98,7 +102,7 @@ type SearchResult struct {
 	Category    string                 `json:"category"`
 	Score       float64                `json:"score"`
 	Metadata    map[string]interface{} `json:"metadata,omitempty"`
-} 
+}
 
 type SearchResponse struct {
 	Results    []SearchResult `json:"results"`
@@ -110,4 +114,25 @@ type QueuedJob struct {
 	ConfigID  string      `json:"config_id"`
 	Config    ModelConfig `json:"config"`
 	Timestamp string      `json:"timestamp"`
+}
+
+// Optional: Add a type for available LLM models (can be used for validation)
+type LLMModelInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+var AvailableLLMModels = map[string]LLMModelInfo{
+	"deepseek-coder": {
+		Name:        "DeepSeek Coder 1.3B",
+		Description: "Code-optimized model for technical content",
+	},
+	"gpt2": {
+		Name:        "GPT-2",
+		Description: "General purpose language model",
+	},
+	"opt-350m": {
+		Name:        "OPT 350M",
+		Description: "Compact language model for general text",
+	},
 }

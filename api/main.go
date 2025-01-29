@@ -89,6 +89,7 @@ func setupRouter(configService *handlers.ConfigService, searchService *handlers.
 	r.GET("/config/status/:id", configService.GetTrainingStatus)
 	r.PUT("/config/status/:id", configService.UpdateConfigStatus)
 
+	r.GET("/config/llm-models", configService.GetAvailableLLMModels)
 	// Queue monitoring
 	r.GET("/queue", configService.GetQueuedJobs)
 
@@ -113,7 +114,7 @@ func main() {
 	}
 
 	// Initialize MongoDB
-	db, err := initMongoDB() 
+	db, err := initMongoDB()
 	if err != nil {
 		log.Fatalf("Failed to connect to MongoDB: %v", err)
 	}

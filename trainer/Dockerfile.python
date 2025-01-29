@@ -1,59 +1,19 @@
-ARG PYTHON_VERSION=3.9
-ARG BUILD_TYPE=cpu
-ARG PYTORCH_INDEX=https://download.pytorch.org/whl/cpu
+ARG BASE_IMAGE=ml-base:latest
+FROM ${BASE_IMAGE} as base
 
-FROM python:${PYTHON_VERSION}-slim as base
-
-WORKDIR /app
-
-# Install system dependencies and cleanup in a single layer
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    curl \
-    git \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create non-root user
-RUN adduser --disabled-password --gecos '' appuser && \
-    mkdir -p /app/models /app/data && \
+# Create non-root user and setup directories
+RUN useradd -ms /bin/bash appuser && \
     chown -R appuser:appuser /app
 
-# Set Python environment variables
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_RETRIES=10 \
-    PIP_TIMEOUT=100 \
-    PIP_DEFAULT_TIMEOUT=100
-
-FROM base as builder
-
-ARG BUILD_TYPE
-ARG PYTORCH_INDEX
-
-# Copy requirements first for better caching
-COPY requirements.txt .
-
-# Install dependencies with retry logic and increased timeout
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir torch --index-url ${PYTORCH_INDEX} --timeout 100 && \
-    pip install --no-cache-dir -r requirements.txt --timeout 100
-
-FROM builder as dev
+# Install service-specific dependencies
+COPY requirements.service.txt .
+RUN pip3 install --no-cache-dir -r requirements.service.txt && \
+    rm requirements.service.txt
 
 USER appuser
 
-# Keep container running for development
-CMD ["tail", "-f", "/dev/null"]
-
-FROM builder as prod
-
+FROM base as prod
 COPY --chown=appuser:appuser . .
-
 USER appuser
-
-# Default command (will be overridden by docker-compose)
-CMD ["python", "app.py"]
+CMD ["python3", "app.py"]
 
