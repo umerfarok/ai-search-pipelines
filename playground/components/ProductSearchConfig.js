@@ -20,20 +20,16 @@ const ModelStatus = {
     COMPLETED: "completed",
     FAILED: "failed",
     CANCELED: "canceled",
-};
+}; 
 
 const AVAILABLE_LLM_MODELS = {
-    "deepseek-coder": {
-        name: "DeepSeek Coder 1.3B",
-        description: "Code-optimized model for technical content"
-    },
     "gpt2": {
         name: "GPT-2",
-        description: "General purpose language model"
+        description: "General purpose language model for product search"
     },
-    "opt-350m": {
-        name: "OPT 350M",
-        description: "Compact language model for general text"
+    "all-mpnet-base": {
+        name: "all-mpnet-base-v2",
+        description: "Powerful embedding model for semantic search"
     }
 };
 
@@ -66,8 +62,8 @@ const useModelConfig = () => {
             batch_size: 128,
             max_tokens: 512,
             validation_split: 0.2,
+            llm_model: "gpt2",
             training_params: {},
-            llm_model: "deepseek-coder", // Add default model
         },
     });
 
@@ -284,7 +280,7 @@ const ModelList = ({ onSelect, selectedConfigId }) => {
 
     return (
         <div className="space-y-4">
-            {models.map((model) => (
+            {models?.map((model) => (
                 <div
                     key={model._id}
                     className={`p-4 border rounded-lg cursor-pointer transition-colors ${selectedConfigId === model._id ? "border-blue-500 bg-blue-50" : "hover:bg-gray-50"
@@ -350,6 +346,19 @@ export default function ProductSearchConfig() {
             if (!csvFile) {
                 throw new Error("Please upload a CSV file first");
             }
+
+            // Update training configuration
+            setConfig(prev => ({
+                ...prev,
+                training_config: {
+                    ...prev.training_config,
+                    model_type: "transformer",
+                    embedding_model: "all-mpnet-base-v2",
+                    batch_size: 4,
+                    max_tokens: 512,
+                }
+            }));
+
             await submitConfig(csvFile);
         } catch (err) {
             console.error("Submission error:", err);
@@ -479,7 +488,7 @@ export default function ProductSearchConfig() {
                                 </div>
                                 {showColumns && (
                                     <div className="mt-4 grid grid-cols-2 gap-2">
-                                        {csvHeaders.map((header, index) => (
+                                        {csvHeaders?.map((header, index) => (
                                             <div key={index} className="p-2 bg-gray-50 rounded-lg text-sm text-gray-700">
                                                 {header}
                                             </div>
@@ -511,7 +520,7 @@ export default function ProductSearchConfig() {
                                                 className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                             >
                                                 <option value="">Select column</option>
-                                                {csvHeaders.map(header => (
+                                                {csvHeaders?.map(header => (
                                                     <option key={header} value={header}>{header}</option>
                                                 ))}
                                             </select>

@@ -1,25 +1,33 @@
 # AI-Powered Product Search Engine
 
-An advanced AI-based search solution that uses neural networks and transformer models to understand and match product descriptions semantically. Built with modern AI/ML technologies, Go, Python, and React.
+An advanced AI-based search solution that uses fine-tuned language models and transformer architectures to understand natural language queries and product descriptions. Built with modern AI/ML technologies, Go, Python, and React.
 [![Integration Tests](https://github.com/umerfarok/ai-search-pipelines/actions/workflows/integration-tests.yml/badge.svg)](https://github.com/umerfarok/ai-search-pipelines/actions/workflows/integration-tests.yml)
 
 ## 🤖 AI Features
 
-- **Neural Search**: Uses transformer-based deep learning models for semantic understanding
-- **Contextual Understanding**: Understands product context beyond keyword matching
-- **Smart Embeddings**: Generates vector embeddings using state-of-the-art language models
-- **Intelligent Ranking**: AI-powered relevance scoring and result ranking
-- **Adaptive Learning**: Support for model retraining and version management
-- **Semantic Matching**: Understands similar products even with different descriptions
+- **Natural Language Understanding**: Process natural language queries like "I need something to deep fry fish" or "Looking for mouse control products"
+- **LLM Fine-tuning**: Automatically fine-tunes GPT models on your product catalog for domain-specific responses
+- **Contextual Understanding**: Creates rich product context for better semantic understanding
+- **Smart Embeddings**: Uses all-mpnet-base-v2 for high-quality semantic embeddings
+- **Hybrid Search**: Combines semantic search with fine-tuned LLM responses
+- **Adaptive Learning**: Supports model retraining and version management
 
-## 🌟 Features
+## 🌟 Key Features
 
-- **Semantic Product Search**: Advanced search capabilities using sentence embeddings
-- **Model Management**: Train and manage multiple search models
-- **Real-time Training**: Queue-based training system with progress monitoring
-- **Custom Schema Mapping**: Flexible product data mapping
-- **Advanced Filtering**: Multi-dimensional filtering capabilities
-- **Modern UI**: Responsive React-based interface
+- **Natural Language Product Search**: 
+  - Ask questions in plain English about product needs
+  - Get detailed, context-aware responses
+  - Smart product recommendations based on use cases
+
+- **Model Management**: 
+  - Fine-tune LLMs on your product data
+  - Monitor training progress in real-time
+  - Version control for models
+
+- **Custom Training**:
+  - CSV data import with flexible schema mapping
+  - Automatic use case extraction
+  - Progressive model improvement
 
 ## 🏗️ Technical Architecture
 
@@ -27,44 +35,50 @@ The project leverages modern AI/ML architecture with three main services:
 
 ### AI/ML Components
 
-- **Transformer Models**: Uses BERT/MPNet-based models for semantic understanding
-- **Neural Embeddings**: Generates high-dimensional vector representations of products
-- **Cosine Similarity**: Implements efficient vector similarity search
-- **Batch Processing**: Optimized for large-scale data processing with GPU acceleration
-- **Model Versioning**: Supports multiple AI models with different training configurations
-- **Real-time Inference**: Fast search capabilities using optimized model loading
+- **Transformer Models**: 
+  - GPT-2 base model for fine-tuning
+  - MPNet embeddings for semantic search
+  - Optimized for product domain
+
+- **Training Pipeline**:
+  - Automatic data preprocessing
+  - Use case extraction
+  - Query-response pair generation
+  - Fine-tuning with custom product context
+
+- **Model Storage**:
+  - Cached model loading
+  - Shared model volumes
+  - S3-compatible storage
 
 ### Service Architecture
 
-1. **API Service (Go)**
-   - Handles configuration management
-   - Manages model versions
+1. **Training Service**
+   - Fine-tunes LLM models
+   - Generates product embeddings
+   - Saves models to cache directory
+   - Real-time progress monitoring
+
+2. **Search Service**
+   - Loads fine-tuned models
+   - Processes natural language queries
+   - Combines semantic search with LLM responses
+   - Handles context-aware filtering
+
+3. **API Service**
+   - Manages model configurations
    - Coordinates training jobs
+   - Handles model versioning
    - Routes search requests
-
-2. **Training Service (Python)**
-   - Processes training jobs from queue
-   - Generates embeddings using transformer models
-   - Saves model artifacts to S3
-   - Reports training progress
-
-3. **Search Service (Python)**
-   - Loads trained models
-   - Performs semantic search
-   - Handles filtering and ranking
-   - Returns relevant results
 
 ## 🚀 Getting Started
 
 ### Prerequisites
 
 - Docker and Docker Compose
-- Go 1.21+
-- Python 3.9+
-- Node.js 18+
-- MongoDB
-- Redis
-- LocalStack (for local S3)
+- NVIDIA GPU (recommended) with CUDA support
+- 8GB+ RAM
+- 20GB+ disk space
 
 ### Environment Setup
 
@@ -99,6 +113,11 @@ BATCH_SIZE=128
 SERVICE_PORT=5000
 MODEL_CACHE_SIZE=2
 MIN_SCORE=0.2
+
+# New Variables
+MODEL_CACHE_DIR=/app/model_cache
+SHARED_MODELS_DIR=/app/shared_models
+CUDA_VISIBLE_DEVICES=0  # For GPU support
 ```
 
 ### Running with Docker
@@ -200,33 +219,6 @@ npm run dev
 
 ## 💡 Configuration Options
 
-### Schema Mapping
-```json
-{
-  "id_column": "product_id",
-  "name_column": "title",
-  "description_column": "description",
-  "category_column": "category",
-  "custom_columns": [
-    {
-      "user_column": "price",
-      "standard_column": "price",
-      "role": "filter"
-    }
-  ]
-}
-```
-
-### Training Configuration
-```json
-{
-  "model_type": "transformer",
-  "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
-  "batch_size": 128,
-  "max_tokens": 512,
-  "validation_split": 0.2
-}
-```
 
 ## 📊 Monitoring
 

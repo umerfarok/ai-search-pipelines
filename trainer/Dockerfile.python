@@ -13,6 +13,13 @@ RUN pip3 install --no-cache-dir -r requirements.service.txt && \
 USER appuser
 
 FROM base as prod
+RUN mkdir -p /app/model_cache \
+    && mkdir -p /app/model_cache/transformers \
+    && mkdir -p /app/model_cache/huggingface \
+    && mkdir -p /app/shared_models \
+    && chown -R 1000:1000 /app \
+    && chmod -R 755 /app
+
 COPY --chown=appuser:appuser . .
 USER appuser
 CMD ["python3", "app.py"]

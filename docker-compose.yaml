@@ -11,7 +11,7 @@ services:
       PYTHONUNBUFFERED: 1
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      AWS_ACCESS_KEY: ${AWS_ACCESS_KEY}
+      AWS_ACCESS_KEY: ${AWS_ACCESS_KEY} 
       AWS_SECRET_KEY: ${AWS_SECRET_KEY}
       S3_BUCKET: ${S3_BUCKET}
       AWS_REGION: ${AWS_REGION}
@@ -62,6 +62,10 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
       CUDA_VISIBLE_DEVICES: 0
       MODEL_CACHE_DIR: /app/model_cache
+      SHARED_MODELS_DIR: /app/shared_models
+      TRANSFORMER_CACHE: /app/model_cache/transformers
+      HF_HOME: /app/model_cache/huggingface
+      TORCH_HOME: /app/model_cache
     ports:
       - "5000:5000"
     command: ["python", "search_service.py"]
@@ -76,7 +80,13 @@ services:
     networks:
       - app-network
     volumes:
-      - model_cache:/app/model_cache
+      - model_cache:/app/model_cache:rw
+      - shared_models:/app/shared_models:rw
+    user: "1000:1000"  # Add this line to match your host user ID
+    entrypoint: >
+      /bin/sh -c "
+      python search_service.py
+      "
 
   training-service:
     build:
@@ -104,6 +114,13 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
       CUDA_VISIBLE_DEVICES: 0
       MODEL_CACHE_DIR: /app/model_cache
+      SHARED_MODELS_DIR: /app/shared_models
+      TRANSFORMER_CACHE: /app/model_cache/transformers
+      HF_HOME: /app/model_cache/huggingface
+      TORCH_HOME: /app/model_cache
+      TRANSFORMERS_OFFLINE: "0"  # Ensure we can download models
+      HF_DATASETS_OFFLINE: "0"
+      TRANSFORMERS_CACHE: /app/model_cache/transformers
     ports:
       - "5001:5001"
     command: ["python", "training_service.py"]
@@ -118,7 +135,16 @@ services:
     networks:
       - app-network
     volumes:
-      - model_cache:/app/model_cache
+      - model_cache:/app/model_cache:rw
+      - shared_models:/app/shared_models:rw
+      - ./cache/temp:/tmp/training:rw  # Add temp storage
+    tmpfs:
+      - /tmp:exec,size=4G  # Add more temp space
+    user: "1000:1000"  # Add this line to match your host user ID
+    entrypoint: >
+      /bin/sh -c "
+      python training_service.py
+      "
 
   redis:
     image: redis:7-alpine
@@ -163,10 +189,18 @@ services:
       - DEBUG=1
       - PERSISTENCE=1
       - DATA_DIR=/var/lib/localstack/data
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - LEGACY_DIRECTORIES=1
+      - DISABLE_CORS_CHECKS=1
+      # Add these environment variables
+      - LOCALSTACK_VOLUME_DIR=/var/lib/localstack
+      - FORCE_NONINTERACTIVE=1
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock"
-      - "localstack_data:/var/lib/localstack"
+      - "./localstack/data:/var/lib/localstack/data"  # Changed this
       - "./localstack/init-s3.sh:/docker-entrypoint-initaws.d/init-s3.sh"
+      # Remove the bind mount causing issues and replace with this
+      - "./cache/s3:/var/lib/localstack/s3"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
       interval: 30s
@@ -179,7 +213,24 @@ volumes:
   mongodb_data:
   redis_data:
   localstack_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/localstack/data
+      uid: "1000"
+      gid: "1000"
+      mode: "0755"
   model_cache:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/cache/models  # Create this directory in your project
+      uid: "1000"  # Add this
+      gid: "1000"  # Add this
+      mode: "0755" # Add this
+  shared_models:
     driver: local
 
 networks:
