@@ -1,19 +1,4 @@
-version: '3.3'
-
-x-common-variables: &common-variables
-  PYTHONUNBUFFERED: 1
-  REDIS_HOST: redis
-  REDIS_PORT: 6379
-  AWS_ACCESS_KEY: ${AWS_ACCESS_KEY}
-  AWS_SECRET_KEY: ${AWS_SECRET_KEY}
-  S3_BUCKET: ${S3_BUCKET}
-  AWS_REGION: ${AWS_REGION}
-  AWS_ENDPOINT_URL: http://localstack:4566
-
-x-common-build: &common-build
-  args:
-    PYTHON_VERSION: 3.9
-    BUILD_TYPE: gpu
+version: '2.4'
 
 services:
   api:
@@ -23,7 +8,14 @@ services:
     ports:
       - "8080:8080"
     environment:
-      <<: *common-variables
+      PYTHONUNBUFFERED: 1
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      AWS_ACCESS_KEY: ${AWS_ACCESS_KEY}
+      AWS_SECRET_KEY: ${AWS_SECRET_KEY}
+      S3_BUCKET: ${S3_BUCKET}
+      AWS_REGION: ${AWS_REGION}
+      AWS_ENDPOINT_URL: http://localstack:4566
       MONGO_URI: mongodb://root:example@mongo:27017
       SEARCH_SERVICE_HOST: http://search-service:5000
       TRAINING_SERVICE_HOST: http://training-service:5001
@@ -48,21 +40,30 @@ services:
 
   search-service:
     build:
-      <<: *common-build
       context: ./trainer
       dockerfile: Dockerfile.python
       args:
+        PYTHON_VERSION: 3.9
+        BUILD_TYPE: gpu
         PYTORCH_INDEX: "https://download.pytorch.org/whl/cu118"
         BASE_IMAGE: ml-base:latest
     image: search-service:latest
-    ports:
-      - "5000:5000"
+    runtime: nvidia
     environment:
-      <<: *common-variables
+      PYTHONUNBUFFERED: 1
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      AWS_ACCESS_KEY: ${AWS_ACCESS_KEY}
+      AWS_SECRET_KEY: ${AWS_SECRET_KEY}
+      S3_BUCKET: ${S3_BUCKET}
+      AWS_REGION: ${AWS_REGION}
+      AWS_ENDPOINT_URL: http://localstack:4566
       SERVICE_PORT: 5000
       NVIDIA_VISIBLE_DEVICES: all
       CUDA_VISIBLE_DEVICES: 0
       MODEL_CACHE_DIR: /app/model_cache
+    ports:
+      - "5000:5000"
     command: ["python", "search_service.py"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
@@ -72,13 +73,6 @@ services:
     depends_on:
       - redis
       - ml-base
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
     networks:
       - app-network
     volumes:
@@ -86,23 +80,32 @@ services:
 
   training-service:
     build:
-      <<: *common-build 
       context: ./trainer
       dockerfile: Dockerfile.python
       args:
+        PYTHON_VERSION: 3.9
+        BUILD_TYPE: gpu
         PYTORCH_INDEX: "https://download.pytorch.org/whl/cu118"
         BASE_IMAGE: ml-base:latest
     image: training-service:latest
-    ports:
-      - "5001:5001"
+    runtime: nvidia
     environment:
-      <<: *common-variables
+      PYTHONUNBUFFERED: 1
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      AWS_ACCESS_KEY: ${AWS_ACCESS_KEY}
+      AWS_SECRET_KEY: ${AWS_SECRET_KEY}
+      S3_BUCKET: ${S3_BUCKET}
+      AWS_REGION: ${AWS_REGION}
+      AWS_ENDPOINT_URL: http://localstack:4566
       SERVICE_PORT: 5001
       TRAINING_QUEUE: training_queue
       MODEL_PREFIX: model_status
       NVIDIA_VISIBLE_DEVICES: all
       CUDA_VISIBLE_DEVICES: 0
       MODEL_CACHE_DIR: /app/model_cache
+    ports:
+      - "5001:5001"
     command: ["python", "training_service.py"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
@@ -112,13 +115,6 @@ services:
     depends_on:
       - redis
       - ml-base
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
     networks:
       - app-network
     volumes:
