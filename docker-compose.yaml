@@ -109,6 +109,7 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    runtime: nvidia  # Add this back
 
   training-service:
     build:
@@ -180,12 +181,14 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    runtime: nvidia  
 
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
     command: redis-server --appendonly yes
+     
     volumes:
       - redis_data:/data
     healthcheck:
