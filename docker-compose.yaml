@@ -48,7 +48,7 @@ services:
         PYTORCH_INDEX: "https://download.pytorch.org/whl/cu118"
         BASE_IMAGE: ml-base:latest
     image: search-service:latest
-    runtime: nvidia
+    runtime: CUDA
     environment:
       PYTHONUNBUFFERED: 1
       REDIS_HOST: redis
@@ -113,7 +113,7 @@ services:
         PYTORCH_INDEX: "https://download.pytorch.org/whl/cu118"
         BASE_IMAGE: ml-base:latest
     image: training-service:latest
-    runtime: nvidia
+    runtime: CUDA
     environment:
       PYTHONUNBUFFERED: 1
       REDIS_HOST: redis

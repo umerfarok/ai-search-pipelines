@@ -27,6 +27,7 @@ from transformers import (
     DataCollatorForLanguageModeling
 )
 from datasets import Dataset
+from dataclasses import dataclass, field
 
 class ModelStatus(Enum):
     PENDING = "pending"
@@ -41,24 +42,25 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+@dataclass
 class AppConfig:
-    REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-    REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-    REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
-    TRAINING_QUEUE = "training_queue"
-    MODEL_STATUS_PREFIX = "model_status:"
-    SERVICE_PORT = int(os.getenv("SERVICE_PORT", 5001))
-    BATCH_SIZE = int(os.getenv("BATCH_SIZE", 128))
-    AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY")
-    AWS_SECRET_KEY = os.getenv("AWS_SECRET_KEY")
-    S3_BUCKET = os.getenv("S3_BUCKET")
-    S3_REGION = os.getenv("AWS_REGION", "us-east-1")
-    API_HOST = os.getenv("API_HOST", "http://api:8080")
-    AWS_SSL_VERIFY = os.getenv("AWS_SSL_VERIFY", "true")
-    AWS_ENDPOINT_URL = os.getenv("AWS_ENDPOINT_URL")
+    REDIS_HOST: str = os.getenv("REDIS_HOST", "localhost")
+    REDIS_PORT: int = int(os.getenv("REDIS_PORT", 6379))
+    REDIS_PASSWORD: str = os.getenv("REDIS_PASSWORD", "")
+    TRAINING_QUEUE: str = "training_queue"
+    MODEL_STATUS_PREFIX: str = "model_status:"
+    SERVICE_PORT: int = int(os.getenv("SERVICE_PORT", 5001))
+    BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", 128))
+    AWS_ACCESS_KEY: str = os.getenv("AWS_ACCESS_KEY")
+    AWS_SECRET_KEY: str = os.getenv("AWS_SECRET_KEY")
+    S3_BUCKET: str = os.getenv("S3_BUCKET")
+    S3_REGION: str = os.getenv("AWS_REGION", "us-east-1")
+    API_HOST: str = os.getenv("API_HOST", "http://api:8080")
+    AWS_SSL_VERIFY: str = os.getenv("AWS_SSL_VERIFY", "true")
+    AWS_ENDPOINT_URL: str = os.getenv("AWS_ENDPOINT_URL")
     
-    # Updated model configurations
-    AVAILABLE_LLM_MODELS = {
+    # Use field with default_factory for mutable defaults
+    AVAILABLE_LLM_MODELS: Dict[str, Dict[str, str]] = field(default_factory=lambda: {
         "gpt2-product": {
             "name": "gpt2",
             "description": "Fine-tuned GPT-2 model for product search"
@@ -67,12 +69,12 @@ class AppConfig:
             "name": "sentence-transformers/all-mpnet-base-v2",
             "description": "Powerful embedding model for semantic search"
         }
-    }
-    DEFAULT_MODEL = "gpt2-product"
-    MODEL_CACHE_DIR = os.getenv("MODEL_CACHE_DIR", "/app/model_cache")
-    SHARED_MODELS_DIR = os.getenv("SHARED_MODELS_DIR", "/app/shared_models")
-    TRANSFORMER_CACHE = os.getenv("TRANSFORMER_CACHE", "/app/model_cache/transformers")
-    HF_HOME = os.getenv("HF_HOME", "/app/model_cache/huggingface")
+    })
+    DEFAULT_MODEL: str = "gpt2-product"
+    MODEL_CACHE_DIR: str = os.getenv("MODEL_CACHE_DIR", "/app/model_cache")
+    SHARED_MODELS_DIR: str = os.getenv("SHARED_MODELS_DIR", "/app/shared_models")
+    TRANSFORMER_CACHE: str = os.getenv("TRANSFORMER_CACHE", "/app/model_cache/transformers")
+    HF_HOME: str = os.getenv("HF_HOME", "/app/model_cache/huggingface")
     
     @classmethod
     def get_cache_path(cls, model_path: str) -> str:
@@ -81,7 +83,8 @@ class AppConfig:
     
     @classmethod
     def get_model_path(cls, model_id: str) -> str:
-        return os.path.join(cls.MODEL_CACHE_DIR, model_id)
+        """Get model path in shared directory"""
+        return os.path.join(cls.SHARED_MODELS_DIR, model_id)
 
     @classmethod
     def setup_cache_dirs(cls):
@@ -282,8 +285,12 @@ class ProductTrainer:
 
             # Create model output directory early
             model_output_dir = os.path.join(output_dir, "llm")
+            shared_output_dir = os.path.join(AppConfig.SHARED_MODELS_DIR, output_dir)
+            shared_llm_dir = os.path.join(shared_output_dir, "llm")
+            
             os.makedirs(model_output_dir, exist_ok=True)
-
+            os.makedirs(shared_llm_dir, exist_ok=True)
+ 
             logger.info(f"Starting LLM fine-tuning with {len(dataset)} samples")
             
             training_args = TrainingArguments(
@@ -350,6 +357,26 @@ class ProductTrainer:
             # Save tokenizer
             self.llm_tokenizer.save_pretrained(model_output_dir)
             
+            # Copy to shared volume
+            logger.info(f"Copying model to shared volume: {shared_output_dir}")
+            required_files = [
+                "config.json",
+                "pytorch_model.bin",
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "special_tokens_map.json",
+                "model_info.json",
+                "vocab.json",
+                "merges.txt"
+            ]
+
+            for file in required_files:
+                src_path = os.path.join(model_output_dir, file)
+                dest_path = os.path.join(shared_llm_dir, file)
+                if os.path.exists(src_path):
+                    os.system(f"cp {src_path} {dest_path}")
+                    logger.info(f"Copied {src_path} to {dest_path}")
+
             # Verify the model files exist
             required_files = ["pytorch_model.bin", "config.json", "tokenizer.json"]
             missing_files = []
@@ -474,6 +501,15 @@ class ModelTrainer:
             
             # Generate embeddings
             embeddings = self.product_trainer.generate_embeddings(texts)
+            self.update_api_status(
+                    config_id,
+                    ModelStatus.COMPLETED.value,
+                    progress=100,
+                    model_info={
+                        "status": "processing",
+                        "model": AppConfig.DEFAULT_MODEL
+                    }
+                )
             
             # Prepare training data for LLM
             dataset = self.product_trainer.prepare_training_data(df, config)

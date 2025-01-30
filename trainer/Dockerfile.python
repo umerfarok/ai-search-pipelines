@@ -15,8 +15,10 @@ USER appuser
 FROM base as prod
 RUN mkdir -p /app/model_cache \
     && mkdir -p /app/model_cache/transformers \
-    && mkdir -p /app/model_cache/huggingface \
+    && mkdir -p /app/model_cache/huggingface \ 
     && mkdir -p /app/shared_models \
+    mkdir -p models \
+    chmod 777 models \
     && chown -R 1000:1000 /app \
     && chmod -R 755 /app
 
