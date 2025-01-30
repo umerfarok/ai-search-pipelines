@@ -61,11 +61,19 @@ services:
       SERVICE_PORT: 5000
       NVIDIA_VISIBLE_DEVICES: all
       CUDA_VISIBLE_DEVICES: 0
-      MODEL_CACHE_DIR: /app/model_cache
-      SHARED_MODELS_DIR: /app/shared_models
+      MODEL_CACHE_DIR: /app/models/cache  # Cache within shared directory
+      SHARED_MODELS_DIR: /app/models  # Simplified shared path
       TRANSFORMER_CACHE: /app/model_cache/transformers
       HF_HOME: /app/model_cache/huggingface
       TORCH_HOME: /app/model_cache
+      CUDA_LAUNCH_BLOCKING: "1"  # For better error reporting
+      TORCH_USE_CUDA_DSA: "1"    # Enable device-side assertions
+      PYTORCH_NO_CUDA_MEMORY_CACHING: "1"  # Add this
+      S3_CACHE_DIR: /app/s3_cache
+      TEMP_DIR: /tmp/search
+      # Add these for better CUDA stability
+      CUDA_DEVICE_MAX_CONNECTIONS: "1"
+      NCCL_P2P_DISABLE: "1"
     ports:
       - "5000:5000"
     command: ["python", "search_service.py"]
@@ -74,14 +82,21 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-    depends_on:
+    depends_on: 
       - redis
       - ml-base
     networks:
       - app-network
     volumes:
-      - model_cache:/app/model_cache:rw
-      - shared_models:/app/shared_models:rw
+      - type: bind
+        source: ./models
+        target: /app/models
+      - type: bind
+        source: ./cache/temp
+        target: /tmp/search
+      - type: bind
+        source: ./cache/s3_cache
+        target: /app/s3_cache
     user: "1000:1000"  # Add this line to match your host user ID
     entrypoint: >
       /bin/sh -c "
@@ -113,14 +128,17 @@ services:
       MODEL_PREFIX: model_status
       NVIDIA_VISIBLE_DEVICES: all
       CUDA_VISIBLE_DEVICES: 0
-      MODEL_CACHE_DIR: /app/model_cache
-      SHARED_MODELS_DIR: /app/shared_models
+      MODEL_CACHE_DIR: /app/models/cache  # Same cache location
+      SHARED_MODELS_DIR: /app/models  # Same shared path
       TRANSFORMER_CACHE: /app/model_cache/transformers
       HF_HOME: /app/model_cache/huggingface
       TORCH_HOME: /app/model_cache
       TRANSFORMERS_OFFLINE: "0"  # Ensure we can download models
       HF_DATASETS_OFFLINE: "0"
       TRANSFORMERS_CACHE: /app/model_cache/transformers
+      CUDA_LAUNCH_BLOCKING: "1"  # For better error reporting
+      TORCH_USE_CUDA_DSA: "1"    # Enable device-side assertions
+      PYTORCH_CUDA_ALLOC_CONF: "max_split_size_mb:512"  # Help prevent memory fragmentation
     ports:
       - "5001:5001"
     command: ["python", "training_service.py"]
@@ -135,9 +153,12 @@ services:
     networks:
       - app-network
     volumes:
-      - model_cache:/app/model_cache:rw
-      - shared_models:/app/shared_models:rw
-      - ./cache/temp:/tmp/training:rw  # Add temp storage
+      - type: bind
+        source: ./models
+        target: /app/models
+      - type: bind
+        source: ./cache/temp
+        target: /tmp/training
     tmpfs:
       - /tmp:exec,size=4G  # Add more temp space
     user: "1000:1000"  # Add this line to match your host user ID
@@ -214,24 +235,22 @@ volumes:
   redis_data:
   localstack_data:
     driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${PWD}/localstack/data
-      uid: "1000"
-      gid: "1000"
-      mode: "0755"
   model_cache:
     driver: local
     driver_opts:
       type: none
       o: bind
-      device: ${PWD}/cache/models  # Create this directory in your project
+      device: ./cache/models  # Create this directory in your project
       uid: "1000"  # Add this
       gid: "1000"  # Add this
-      mode: "0755" # Add this
-  shared_models:
+  s3_cache:
     driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./cache/s3_cache
+      uid: "1000"
+      gid: "1000"
 
 networks:
   app-network:
