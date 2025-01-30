@@ -48,7 +48,6 @@ services:
         PYTORCH_INDEX: "https://download.pytorch.org/whl/cu118"
         BASE_IMAGE: ml-base:latest
     image: search-service:latest
-    runtime: CUDA
     environment:
       PYTHONUNBUFFERED: 1
       REDIS_HOST: redis
@@ -60,7 +59,8 @@ services:
       AWS_ENDPOINT_URL: http://localstack:4566
       SERVICE_PORT: 5000
       NVIDIA_VISIBLE_DEVICES: all
-      CUDA_VISIBLE_DEVICES: 0
+      CUDA_VISIBLE_DEVICES: "0"  # Enable CUDA
+      FORCE_CPU: "0"  # Allow GPU usage
       MODEL_CACHE_DIR: /app/models/cache  # Cache within shared directory
       SHARED_MODELS_DIR: /app/models  # Simplified shared path
       TRANSFORMER_CACHE: /app/model_cache/transformers
@@ -102,6 +102,13 @@ services:
       /bin/sh -c "
       python search_service.py
       "
+    deploy:  # Add deploy configuration
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
   training-service:
     build:
@@ -113,7 +120,6 @@ services:
         PYTORCH_INDEX: "https://download.pytorch.org/whl/cu118"
         BASE_IMAGE: ml-base:latest
     image: training-service:latest
-    runtime: CUDA
     environment:
       PYTHONUNBUFFERED: 1
       REDIS_HOST: redis
@@ -127,7 +133,8 @@ services:
       TRAINING_QUEUE: training_queue
       MODEL_PREFIX: model_status
       NVIDIA_VISIBLE_DEVICES: all
-      CUDA_VISIBLE_DEVICES: 0
+      CUDA_VISIBLE_DEVICES: "0"  # Enable CUDA
+      FORCE_CPU: "0"  # Allow GPU usage
       MODEL_CACHE_DIR: /app/models/cache  # Same cache location
       SHARED_MODELS_DIR: /app/models  # Same shared path
       TRANSFORMER_CACHE: /app/model_cache/transformers
@@ -166,6 +173,13 @@ services:
       /bin/sh -c "
       python training_service.py
       "
+    deploy: 
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
   redis:
     image: redis:7-alpine
@@ -192,7 +206,7 @@ services:
     volumes:
       - mongodb_data:/data/db
     healthcheck:
-      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      test: ["CMD", "echo", "db.runCommand('ping').ok", "|", "mongosh", "localhost:27017/test", "--quiet"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -213,14 +227,12 @@ services:
       - DOCKER_HOST=unix:///var/run/docker.sock
       - LEGACY_DIRECTORIES=1
       - DISABLE_CORS_CHECKS=1
-      # Add these environment variables
       - LOCALSTACK_VOLUME_DIR=/var/lib/localstack
       - FORCE_NONINTERACTIVE=1
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock"
-      - "./localstack/data:/var/lib/localstack/data"  # Changed this
+      - "./localstack/data:/var/lib/localstack/data"
       - "./localstack/init-s3.sh:/docker-entrypoint-initaws.d/init-s3.sh"
-      # Remove the bind mount causing issues and replace with this
       - "./cache/s3:/var/lib/localstack/s3"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
@@ -240,9 +252,9 @@ volumes:
     driver_opts:
       type: none
       o: bind
-      device: ./cache/models  # Create this directory in your project
-      uid: "1000"  # Add this
-      gid: "1000"  # Add this
+      device: ./cache/models
+      uid: "1000"
+      gid: "1000"
   s3_cache:
     driver: local
     driver_opts:
