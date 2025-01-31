@@ -534,13 +534,11 @@ class SearchService:
             logger.error(f"Search error: {e}")
             raise
     def _load_products(self, model_path: str) -> Optional[pd.DataFrame]:
-        """Load products data from shared storage or S3"""
-        # Try shared storage first
-        shared_path = os.path.join(
-            AppConfig.SHARED_MODELS_DIR, model_path, "products.csv"
-        )
-        if os.path.exists(shared_path):
-            return pd.read_csv(shared_path)
+        """Load products data from local storage or S3"""
+        # Try local storage first
+        local_path = os.path.join(AppConfig.BASE_MODEL_DIR, model_path, "products.csv")
+        if os.path.exists(local_path):
+            return pd.read_csv(local_path)
 
         # Fall back to S3
         return self.s3_manager.get_csv_content(f"{model_path}/products.csv")
