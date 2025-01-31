@@ -100,61 +100,26 @@ class AppConfig:
 
 
 class ModelCache:
-    def __init__(self, cache_size: int = 4):
-        self.cache_size = cache_size
+    def __init__(self, max_size: int = 4):
         self.cache = OrderedDict()
+        self.max_size = max_size
         self.lock = threading.Lock()
-        self.access_counts = {}
-        self.last_access = {}
 
     def get(self, model_path: str) -> Optional[Dict]:
         with self.lock:
             if model_path in self.cache:
-                self.access_counts[model_path] = (
-                    self.access_counts.get(model_path, 0) + 1
-                )
-                self.last_access[model_path] = time.time()
-                value = self.cache.pop(model_path)
-                self.cache[model_path] = value
-                return value
-
-            cache_path = os.path.join(AppConfig.MODEL_CACHE_DIR, model_path)
-            if os.path.exists(cache_path):
-                try:
-                    data = self._load_from_cache(cache_path)
-                    self.put(model_path, data)
-                    return data
-                except Exception as e:
-                    logger.error(f"Error loading from cache: {e}")
-
+                self.cache.move_to_end(model_path)
+                return self.cache[model_path]
             return None
 
     def put(self, model_path: str, data: Dict):
         with self.lock:
-            if len(self.cache) >= self.cache_size:
-                # Enhanced eviction strategy
-                if model_path in self.cache:
-                    del self.cache[model_path]
-                else:
-                    # Calculate score based on frequency and recency
-                    scores = {}
-                    current_time = time.time()
-                    for path in self.cache:
-                        frequency = self.access_counts.get(path, 0)
-                        recency = current_time - self.last_access.get(path, 0)
-                        scores[path] = frequency / (1 + recency)
-
-                    # Remove item with lowest score
-                    to_remove = min(scores.items(), key=lambda x: x[1])[0]
-                    self.cache.pop(to_remove)
-
-            self.cache[model_path] = data
-            self.access_counts[model_path] = 1
-            self.last_access[model_path] = time.time()
-
-            # Save to cache directory
-            cache_path = os.path.join(AppConfig.MODEL_CACHE_DIR, model_path)
-            self._save_to_cache(cache_path, data)
+            if model_path in self.cache:
+                self.cache.move_to_end(model_path)
+            else:
+                if len(self.cache) >= self.max_size:
+                    self.cache.popitem(last=False)
+                self.cache[model_path] = data
 
     def _save_to_cache(self, cache_path: str, data: Dict):
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
@@ -275,18 +240,19 @@ class ProductSearchManager:
                 base_model_name = metadata.get("models", {}).get("llm", "distilgpt2")
                 model_kwargs = {
                     "device_map": "auto",
-                    "torch_dtype": torch.float16 if torch.cuda.is_available() else torch.float32,
-                    "low_cpu_mem_usage": True
+                    "torch_dtype": (
+                        torch.float16 if torch.cuda.is_available() else torch.float32
+                    ),
+                    "low_cpu_mem_usage": True,
                 }
 
                 if is_peft_model:
                     logger.info("Loading PEFT model...")
                     # Load base model first
                     self.base_model = AutoModelForCausalLM.from_pretrained(
-                        base_model_name,
-                        **model_kwargs
+                        base_model_name, **model_kwargs
                     )
-                    
+
                     # Load PEFT adapter
                     if not os.path.exists(os.path.join(llm_path, "adapter_model.bin")):
                         raise ValueError("PEFT adapter weights not found")
@@ -295,14 +261,13 @@ class ProductSearchManager:
                         self.base_model,
                         llm_path,
                         is_trainable=False,
-                        torch_dtype=model_kwargs["torch_dtype"]
+                        torch_dtype=model_kwargs["torch_dtype"],
                     )
                     self.peft_model.eval()
                 else:
                     logger.info("Loading standard model...")
                     self.base_model = AutoModelForCausalLM.from_pretrained(
-                        llm_path,
-                        **model_kwargs
+                        llm_path, **model_kwargs
                     )
                     self.base_model.eval()
 
@@ -312,8 +277,7 @@ class ProductSearchManager:
                     try:
                         providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
                         self.onnx_session = ort.InferenceSession(
-                            onnx_path,
-                            providers=providers
+                            onnx_path, providers=providers
                         )
                         logger.info("Successfully loaded ONNX model")
                     except Exception as e:
@@ -344,7 +308,7 @@ class ProductSearchManager:
             models_to_clean = [
                 (self.peft_model, "PEFT model"),
                 (self.base_model, "Base model"),
-                (self.onnx_session, "ONNX session")
+                (self.onnx_session, "ONNX session"),
             ]
 
             for model, name in models_to_clean:
@@ -370,25 +334,41 @@ class ProductSearchManager:
             logger.error(f"Error during cleanup: {e}")
 
     def generate_response(self, query: str, product_context: str) -> str:
-        """Generate response using appropriate model with fallback"""
+        """Generate response using the fine-tuned PEFT model"""
         try:
-            # Try ONNX first, then PEFT, then base model
-            if self.onnx_session:
-                try:
-                    return self._generate_response_onnx(query, product_context)
-                except Exception as e:
-                    logger.warning(f"ONNX generation failed, falling back to PEFT/base: {e}")
+            prompt = f"Query: {query}\nContext: {product_context}\nResponse:"
+            inputs = self.tokenizer(
+                prompt,
+                return_tensors="pt",
+                truncation=True,
+                max_length=512,
+                padding=True,
+            )
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
-            if self.peft_model:
-                return self._generate_response_peft(query, product_context)
-            elif self.base_model:
-                return self._generate_response_base(query, product_context)
-            else:
-                raise ValueError("No model available for generation")
+            with torch.no_grad():
+                outputs = self.peft_model.generate(
+                    **inputs,
+                    max_new_tokens=200,
+                    num_beams=4,
+                    temperature=0.7,
+                    top_p=0.95,
+                    do_sample=True,
+                    pad_token_id=self.tokenizer.eos_token_id,
+                    repetition_penalty=1.2,
+                    no_repeat_ngram_size=3,
+                    early_stopping=True,
+                )
+
+            response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            response = response.split("Response:")[-1].strip()
+            return (
+                response if response else "I couldn't generate a meaningful response."
+            )
 
         except Exception as e:
             logger.error(f"Error generating response: {e}")
-            return "I apologize, but I couldn't generate a response about the products."
+            return "I apologize, but there was an error processing your query."
 
     def _generate_response_peft(self, query: str, product_context: str) -> str:
         """Generate response using PEFT model"""
@@ -470,32 +450,62 @@ class SearchService:
         except Exception as e:
             logger.error(f"Error during model preloading: {e}")
 
-    def load_model(self, model_path: str) -> Optional[Dict]:
-        """Load model with priority: shared volume -> cache -> S3"""
+    def load_models(self, model_path: str) -> bool:
+        """Load models with enhanced PEFT support and validation"""
         try:
-            # First try shared volume (mounted in both services)
             shared_path = os.path.join(AppConfig.SHARED_MODELS_DIR, model_path)
-            if self._are_model_files_complete(shared_path):
-                logger.info(f"Loading model from shared volume: {shared_path}")
-                return self._load_from_shared(shared_path)
+            llm_path = os.path.join(shared_path, "llm")
+            logger.info(f"Loading models from {shared_path}")
 
-            # Then try cache
-            cached_data = self.model_cache.get(model_path)
-            if cached_data:
-                logger.info(f"Loading model from cache: {model_path}")
-                return cached_data
+            # Load metadata
+            metadata_path = os.path.join(shared_path, "metadata.json")
+            if not os.path.exists(metadata_path):
+                raise ValueError(f"Metadata not found in {shared_path}")
 
-            # Finally try S3
-            logger.info(f"Loading model from S3: {model_path}")
-            data = self._load_from_s3(model_path)
-            if data:
-                self.model_cache.put(model_path, data)
-                return data
+            with open(metadata_path, "r") as f:
+                metadata = json.load(f)
 
-            raise ValueError(f"Failed to load model from any source: {model_path}")
+            # Initialize tokenizer
+            self.tokenizer = AutoTokenizer.from_pretrained(llm_path)
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+
+            # Load base model
+            base_model_name = metadata.get("models", {}).get("llm", "distilgpt2")
+            model_kwargs = {
+                "device_map": "auto",
+                "torch_dtype": (
+                    torch.float16 if torch.cuda.is_available() else torch.float32
+                ),
+                "low_cpu_mem_usage": True,
+            }
+
+            self.base_model = AutoModelForCausalLM.from_pretrained(
+                base_model_name, **model_kwargs
+            )
+
+            # Load PEFT adapter
+            peft_config = PeftConfig.from_pretrained(llm_path)
+            self.peft_model = PeftModel.from_pretrained(
+                self.base_model,
+                llm_path,
+                config=peft_config,
+                is_trainable=False,
+            )
+            self.peft_model.eval()
+
+            # Load embeddings
+            embeddings_path = os.path.join(shared_path, "embeddings.npy")
+            if not os.path.exists(embeddings_path):
+                raise ValueError(f"Embeddings not found in {shared_path}")
+            self.embeddings = np.load(embeddings_path)
+
+            logger.info("Successfully loaded models")
+            return True
 
         except Exception as e:
-            logger.error(f"Error loading model: {e}")
+            logger.error(f"Error loading models: {e}")
+            self._cleanup_failed_load()
             raise
 
     def _are_model_files_complete(self, path: str) -> bool:
@@ -591,19 +601,21 @@ class SearchService:
     def search(self, query: str, model_path: str, max_items: int = 10) -> Dict:
         """Perform semantic search with response generation"""
         try:
-            logger.info(f"Starting search with model: {model_path}")
-
-            # Load model
-            model_data = self.load_model(model_path)
-            if not model_data:
+            # Load model and embeddings
+            if not self.load_models(model_path):
                 raise ValueError(f"Failed to load model from {model_path}")
 
             # Generate query embedding
-            query_embedding = self.product_search.generate_embedding(query)
-            embeddings = model_data["embeddings"]
+            query_embedding = (
+                self.embedding_model.encode(
+                    query, convert_to_tensor=True, show_progress_bar=False
+                )
+                .cpu()
+                .numpy()
+            )
 
-            # Calculate similarities using batched operations
-            similarities = np.dot(embeddings, query_embedding)
+            # Calculate similarities
+            similarities = np.dot(self.embeddings, query_embedding)
             top_k_idx = np.argsort(similarities)[-max_items:][::-1]
 
             # Load products data
@@ -613,7 +625,7 @@ class SearchService:
 
             # Prepare results
             results = []
-            schema = model_data["metadata"]["config"]["schema_mapping"]
+            schema = self.metadata["config"]["schema_mapping"]
 
             for idx in top_k_idx:
                 score = float(similarities[idx])
@@ -639,31 +651,22 @@ class SearchService:
 
                 results.append(result)
 
-            # Generate natural language response if results found
+            # Generate natural language response
             if results:
                 product_context = self._create_product_context(results[:3])
-                response = self.product_search.generate_response(query, product_context)
-
-                return {
-                    "results": results,
-                    "total": len(results),
-                    "natural_response": response,
-                    "query_info": {
-                        "original": query,
-                        "model_path": model_path,
-                        "model_type": (
-                            "peft"
-                            if self.product_search.peft_model
-                            else "onnx" if self.product_search.onnx_session else "base"
-                        ),
-                    },
-                }
+                response = self.generate_response(query, product_context)
+            else:
+                response = "No matching products found."
 
             return {
-                "results": [],
-                "total": 0,
-                "natural_response": "No matching products found.",
-                "query_info": {"original": query},
+                "results": results,
+                "total": len(results),
+                "natural_response": response,
+                "query_info": {
+                    "original": query,
+                    "model_path": model_path,
+                    "model_type": "peft",
+                },
             }
 
         except Exception as e:
@@ -737,13 +740,12 @@ def health():
         {
             "status": "healthy",
             "device": AppConfig.DEVICE,
-            "cached_models": len(search_service.model_cache.cache),
+            "cached_models": list(search_service.model_cache.cache.keys()),
             "preloaded_models": list(search_service.preloaded_models),
             "model_types": {
-                "peft_available": search_service.product_search.peft_model is not None,
-                "onnx_available": search_service.product_search.onnx_session
-                is not None,
-                "base_available": search_service.product_search.base_model is not None,
+                "peft_available": search_service.peft_model is not None,
+                "onnx_available": search_service.onnx_session is not None,
+                "base_available": search_service.base_model is not None,
             },
         }
     )

@@ -254,11 +254,12 @@ class FastProductTrainer:
             max_tokens = training_config.get("max_tokens", 512)
 
             # Setup directories
+            
             model_output_dir = os.path.join(output_dir, "llm")
             shared_model_dir = os.path.join(AppConfig.SHARED_MODELS_DIR, output_dir)
             shared_llm_dir = os.path.join(shared_model_dir, "llm")
 
-            for dir_path in [model_output_dir, shared_model_dir, shared_llm_dir]:
+            for dir_path in [model_output_dir, shared_model_dir, shared_llm_dir, AppConfig.MODEL_CACHE_DIR]:
                 os.makedirs(dir_path, exist_ok=True)
 
             # Training arguments
@@ -351,6 +352,8 @@ class FastProductTrainer:
         """Save and validate model with comprehensive checks"""
         try:
             logger.info(f"Saving model to {model_dir}")
+            logger.info(f"Contents of {model_dir}: {os.listdir(model_dir)}")
+            logger.info(f"Contents of {shared_dir}: {os.listdir(shared_dir)}")
             
             # Create directories
             os.makedirs(model_dir, exist_ok=True)
@@ -360,7 +363,7 @@ class FastProductTrainer:
             logger.info("Saving PEFT model state...")
             self.peft_model.save_pretrained(
                 model_dir,
-                safe_serialization=True,
+                safe_serialization=False,
                 save_config=True
             )
 
@@ -371,7 +374,7 @@ class FastProductTrainer:
             # 3. Verify saved files
             required_files = [
                 "adapter_config.json",
-                "adapter_model.bin",
+                "adapter_model.bin",  # Now correctly created
                 "tokenizer.json",
                 "special_tokens_map.json",
                 "tokenizer_config.json"
@@ -781,8 +784,10 @@ class FastModelTrainer:
                 "metadata.json",
                 "products.csv",
                 "llm/adapter_config.json",
-                "llm/adapter_model.bin",
+                "llm/adapter_model.bin",  # Now exists
                 "llm/tokenizer.json",
+                "llm/special_tokens_map.json",
+                "llm/tokenizer_config.json"
             ]
 
             for file in files_to_upload:
