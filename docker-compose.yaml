@@ -270,10 +270,29 @@ services:
       - app-network
     depends_on:
       - api
+    volumes:
+      - type: bind
+        source: ./models
+        target: /app/models
+        consistency: cached
+      - type: bind
+        source: ./cache/model_cache
+        target: /app/model_cache
+        consistency: cached
+      - type: bind
+        source: ./cache/temp
+        target: /tmp/search
+      - type: bind
+        source: ./cache/s3_cache
+        target: /app/s3_cache
+networks:
+  app-network:
 
 volumes:
   mongodb_data:
+    driver: local
   redis_data:
+    driver: local
   localstack_data:
     driver: local
   model_cache:
@@ -282,12 +301,21 @@ volumes:
       type: none
       o: bind
       device: ./cache/models
+      uid: "${UID:-1000}"
+      gid: "${GID:-1000}"
   s3_cache:
     driver: local
     driver_opts:
       type: none
       o: bind
       device: ./cache/s3_cache
-
-networks:
-  app-network:
+      uid: "${UID:-1000}"
+      gid: "${GID:-1000}"
+  transformers_cache:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./cache/transformers
+      uid: "${UID:-1000}"
+      gid: "${GID:-1000}"
