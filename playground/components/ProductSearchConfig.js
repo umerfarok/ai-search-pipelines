@@ -2,7 +2,7 @@ import React, { useState, useCallback, useEffect } from "react";
 import {
     AlertCircle, Upload, CheckCircle2, XCircle,
     Loader2, Clock, AlertTriangle, ChevronDown, ChevronUp,
-    Info, RefreshCw
+    Info, RefreshCw, PlusCircle, Trash2
 } from "lucide-react";
 import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
 import { Progress } from "@/components/ui/progress";
@@ -14,7 +14,7 @@ const ModelStatus = {
     PENDING: "pending",
     QUEUED: "queued",
     PROCESSING: "processing",
-    COMPLETED: "completed",
+    COMPLETED: "completed", 
     FAILED: "failed",
     CANCELED: "canceled"
 };
@@ -111,7 +111,7 @@ const useModelConfig = () => {
             name_column: "",
             description_column: "",
             category_column: "",
-            custom_columns: [],
+            custom_columns: [], // Add this line
             required_columns: [],
         },
         training_config: {
@@ -495,6 +495,182 @@ const ModelList = ({ onSelect, selectedConfigId }) => {
     );
 };
 
+// Add new component for custom column configuration
+const CustomColumnConfig = ({ columns, onUpdate, availableColumns }) => {
+    const [showForm, setShowForm] = useState(false);
+    const [newColumn, setNewColumn] = useState({
+        user_column: '',
+        standard_column: '',
+        role: 'training',
+        required: false
+    });
+
+    const roles = [
+        { value: 'training', label: 'Training Data' },
+        { value: 'metadata', label: 'Metadata Only' }
+    ];
+
+    const handleAdd = () => {
+        if (!newColumn.user_column || !newColumn.standard_column) return;
+        
+        onUpdate([...columns, newColumn]);
+        setNewColumn({
+            user_column: '',
+            standard_column: '',
+            role: 'training',
+            required: false
+        });
+        setShowForm(false);
+    };
+
+    const handleRemove = (index) => {
+        const updatedColumns = columns.filter((_, idx) => idx !== index);
+        onUpdate(updatedColumns);
+    };
+
+    return (
+        <div className="space-y-4">
+            <div className="flex justify-between items-center">
+                <h3 className="text-sm font-medium text-gray-700">Custom Columns</h3>
+                {!showForm && (
+                    <button
+                        onClick={() => setShowForm(true)}
+                        className="text-sm text-blue-600 hover:text-blue-800 flex items-center"
+                    >
+                        <PlusCircle className="w-4 h-4 mr-1" />
+                        Add Column
+                    </button>
+                )}
+            </div>
+
+            {/* Existing Custom Columns */}
+            {columns.length > 0 && (
+                <div className="space-y-2">
+                    {columns.map((col, idx) => (
+                        <div key={idx} className="flex items-center justify-between p-2 bg-gray-50 rounded-lg">
+                            <div className="space-y-1">
+                                <div className="text-sm font-medium">{col.standard_column}</div>
+                                <div className="text-xs text-gray-500">
+                                    Maps to: {col.user_column} • Role: {col.role}
+                                    {col.required && ' • Required'}
+                                </div>
+                            </div>
+                            <button
+                                onClick={() => handleRemove(idx)}
+                                className="text-red-500 hover:text-red-700"
+                            >
+                                <Trash2 className="w-4 h-4" />
+                            </button>
+                        </div>
+                    ))}
+                </div>
+            )}
+
+            {/* Add New Column Form */}
+            {showForm && (
+                <div className="border rounded-lg p-4 space-y-4">
+                    <Select
+                        label="CSV Column"
+                        value={newColumn.user_column}
+                        onChange={(e) => setNewColumn(prev => ({ ...prev, user_column: e.target.value }))}
+                        options={availableColumns.map(col => ({ value: col, label: col }))}
+                    />
+
+                    <Input
+                        label="Standard Name"
+                        value={newColumn.standard_column}
+                        onChange={(e) => setNewColumn(prev => ({ ...prev, standard_column: e.target.value }))}
+                        placeholder="e.g., brand, color, size"
+                    />
+
+                    <Select
+                        label="Role"
+                        value={newColumn.role}
+                        onChange={(e) => setNewColumn(prev => ({ ...prev, role: e.target.value }))}
+                        options={roles}
+                    />
+
+                    <div className="flex items-center">
+                        <input
+                            type="checkbox"
+                            id="required"
+                            checked={newColumn.required}
+                            onChange={(e) => setNewColumn(prev => ({ ...prev, required: e.target.checked }))}
+                            className="rounded border-gray-300"
+                        />
+                        <label htmlFor="required" className="ml-2 text-sm text-gray-700">
+                            Required Field
+                        </label>
+                    </div>
+
+                    <div className="flex justify-end space-x-2">
+                        <button
+                            onClick={() => setShowForm(false)}
+                            className="px-3 py-2 text-sm text-gray-600 hover:text-gray-800"
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            onClick={handleAdd}
+                            className="px-3 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700"
+                        >
+                            Add Column
+                        </button>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
+
+// Update the schema mapping section in the main form
+const SchemaMapping = ({ config, setConfig, csvHeaders, validationErrors }) => {
+    const handleCustomColumnsUpdate = (columns) => {
+        setConfig(prev => ({
+            ...prev,
+            schema_mapping: {
+                ...prev.schema_mapping,
+                custom_columns: columns
+            }
+        }));
+    };
+
+    return (
+        <FormSection
+            title="Schema Mapping"
+            description="Map your CSV columns to product attributes"
+        >
+            {/* Required Columns */}
+            {["id", "name", "description", "category"].map((field) => (
+                <Select
+                    key={field}
+                    label={`${field.charAt(0).toUpperCase() + field.slice(1)} Column`}
+                    value={config.schema_mapping[`${field}_column`]}
+                    onChange={(e) => setConfig(prev => ({
+                        ...prev,
+                        schema_mapping: {
+                            ...prev.schema_mapping,
+                            [`${field}_column`]: e.target.value
+                        }
+                    }))}
+                    options={csvHeaders.map(header => ({
+                        value: header,
+                        label: header
+                    }))}
+                    error={validationErrors[`${field}_column`]}
+                />
+            ))}
+
+            {/* Custom Columns */}
+            <CustomColumnConfig
+                columns={config.schema_mapping.custom_columns || []}
+                onUpdate={handleCustomColumnsUpdate}
+                availableColumns={csvHeaders}
+            />
+        </FormSection>
+    );
+};
+
 // Main Component
 export default function ProductSearchConfig() {
     const {
@@ -670,55 +846,12 @@ export default function ProductSearchConfig() {
 
                     {/* CSV Configuration */}
                     {csvHeaders.length > 0 && (
-                        <FormSection
-                            title="CSV Configuration"
-                            description="Map your CSV columns to product attributes"
-                        >
-                            <div
-                                className="flex justify-between items-center cursor-pointer mb-4"
-                                onClick={() => setShowColumns(!showColumns)}
-                            >
-                                <h3 className="text-sm font-medium text-gray-700">Available Columns</h3>
-                                {showColumns ? (
-                                    <ChevronUp className="h-4 w-4" />
-                                ) : (
-                                    <ChevronDown className="h-4 w-4" />
-                                )}
-                            </div>
-
-                            {showColumns && (
-                                <div className="grid grid-cols-2 gap-2 mb-4">
-                                    {csvHeaders.map((header) => (
-                                        <div key={header} className="p-2 bg-gray-50 rounded-lg text-sm">
-                                            {header}
-                                        </div>
-                                    ))}
-                                </div>
-                            )}
-
-                            {/* Column Mapping */}
-                            <div className="space-y-4">
-                                {["id", "name", "description", "category"].map((field) => (
-                                    <Select
-                                        key={field}
-                                        label={`${field.charAt(0).toUpperCase() + field.slice(1)} Column`}
-                                        value={config.schema_mapping[`${field}_column`]}
-                                        onChange={(e) => setConfig(prev => ({
-                                            ...prev,
-                                            schema_mapping: {
-                                                ...prev.schema_mapping,
-                                                [`${field}_column`]: e.target.value
-                                            }
-                                        }))}
-                                        options={csvHeaders.map(header => ({
-                                            value: header,
-                                            label: header
-                                        }))}
-                                        error={validationErrors[`${field}_column`]}
-                                    />
-                                ))}
-                            </div>
-                        </FormSection>
+                        <SchemaMapping
+                            config={config}
+                            setConfig={setConfig}
+                            csvHeaders={csvHeaders}
+                            validationErrors={validationErrors}
+                        />
                     )}
 
                     {/* Model Configuration */}
