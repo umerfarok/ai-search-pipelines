@@ -84,7 +84,7 @@ func setupRouter(configService *handlers.ConfigService, searchService *handlers.
 	r.POST("/config", configService.CreateConfig)
 	r.GET("/config/:id", configService.GetConfig)
 	r.GET("/config", configService.ListConfigs)
-	r.GET("/config/status/:id", configService.GetTrainingStatus)
+	r.GET("/config/status/:id", configService.GetTrainingStatus) 
 	r.PUT("/config/status/:id", configService.UpdateConfigStatus)
 
 	r.GET("/config/llm-models", configService.GetAvailableLLMModels)

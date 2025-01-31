@@ -98,7 +98,7 @@ func (s *SearchService) Search(c *gin.Context) {
 	searchReq := struct {
 		Query     string                 `json:"query"`
 		ModelPath string                 `json:"model_path"`
-		MaxItems  int                    `json:"max_items"`
+		MaxItems  int                    `json:"max_items"` 
 		Filters   map[string]interface{} `json:"filters,omitempty"`
 	}{
 		Query:     req.Query,

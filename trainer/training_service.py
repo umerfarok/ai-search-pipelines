@@ -1,5 +1,7 @@
 import os
 import logging
+import shutil
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, request, jsonify
 import torch
 import torch.nn.functional as F
@@ -28,8 +30,13 @@ from transformers import (
     TrainingArguments,
     DataCollatorForLanguageModeling,
 )
+from peft import get_peft_model, LoraConfig, TaskType, PeftModel, PeftConfig
 from datasets import Dataset
 from dataclasses import dataclass, field
+import multiprocessing
+
+
+multiprocessing.set_start_method("spawn", force=True)
 
 
 class ModelStatus(Enum):
@@ -65,19 +72,29 @@ class AppConfig:
     MAX_RETRIES: int = 3
     RETRY_DELAY: int = 1
 
+    # Default PEFT configuration
+    PEFT_CONFIG = {
+        "r": 8,
+        "lora_alpha": 32,
+        "lora_dropout": 0.1,
+        "bias": "none",
+        "task_type": "CAUSAL_LM",
+    }
+
     # Model configurations
     AVAILABLE_LLM_MODELS: Dict[str, Dict[str, str]] = field(
         default_factory=lambda: {
             "distilgpt2-product": {
                 "name": "distilgpt2",
-                "description": "Lightweight GPT model for product search",
+                "description": "Fast, lightweight model for product search",
             },
-            "all-minilm": {
-                "name": "sentence-transformers/all-MiniLM-L6-v2",  # This is the correct model ID
+            "all-minilm-l6": {
+                "name": "sentence-transformers/all-MiniLM-L6-v2",
                 "description": "Efficient embedding model for semantic search",
             },
         }
     )
+
     DEFAULT_MODEL: str = "distilgpt2-product"
     MODEL_CACHE_DIR: str = os.getenv("MODEL_CACHE_DIR", "/app/model_cache")
     SHARED_MODELS_DIR: str = os.getenv("SHARED_MODELS_DIR", "/app/shared_models")
@@ -89,9 +106,13 @@ class AppConfig:
     @classmethod
     def setup_cache_dirs(cls):
         """Setup cache directories for models"""
-        os.makedirs(cls.MODEL_CACHE_DIR, exist_ok=True)
-        os.makedirs(cls.TRANSFORMER_CACHE, exist_ok=True)
-        os.makedirs(cls.HF_HOME, exist_ok=True)
+        for directory in [
+            cls.MODEL_CACHE_DIR,
+            cls.TRANSFORMER_CACHE,
+            cls.HF_HOME,
+            os.path.join(cls.HF_HOME, "datasets"),
+        ]:
+            os.makedirs(directory, exist_ok=True)
 
         os.environ.update(
             {
@@ -103,33 +124,28 @@ class AppConfig:
         )
 
 
-class ProductTrainer:
+class FastProductTrainer:
     def __init__(self):
         AppConfig.setup_cache_dirs()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.tokenizer = None
         self.model = None
+        self.peft_model = None
         self.embedding_model = None
 
     def initialize_models(self, config: Dict):
-        """Initialize models based on config"""
+        """Initialize models with PEFT configuration"""
         try:
-            # Get model settings from config
-            print(config)
-            model_type = config.get("training_config", {}).get(
-                "model_type", "transformer"
-            )
-            llm_model = config.get("training_config", {}).get("llm_model", "distilgpt2")
-            embedding_model = config.get("training_config", {}).get(
-                "embedding_model", "all-MiniLM-L6-v2"
+            model_name = config.get("training_config", {}).get(
+                "llm_model", "distilgpt2"
             )
 
             # Initialize tokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained(llm_model)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
 
-            # Initialize LLM model with GPU optimization
+            # Initialize base model
             model_kwargs = {
                 "device_map": "auto",
                 "torch_dtype": (
@@ -138,18 +154,31 @@ class ProductTrainer:
                 "low_cpu_mem_usage": True,
             }
 
-            self.model = AutoModelForCausalLM.from_pretrained(llm_model, **model_kwargs)
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name, **model_kwargs
+            )
 
-            # Initialize embedding model with correct identifier
+            # Setup PEFT configuration
+            peft_config = LoraConfig(
+                task_type=TaskType.CAUSAL_LM,
+                inference_mode=False,
+                r=AppConfig.PEFT_CONFIG["r"],
+                lora_alpha=AppConfig.PEFT_CONFIG["lora_alpha"],
+                lora_dropout=AppConfig.PEFT_CONFIG["lora_dropout"],
+                bias=AppConfig.PEFT_CONFIG["bias"],
+            )
+
+            # Create PEFT model
+            self.peft_model = get_peft_model(self.model, peft_config)
+            self.peft_model.print_trainable_parameters()
+
+            # Initialize embedding model
             self.embedding_model = SentenceTransformer(
                 "sentence-transformers/all-MiniLM-L6-v2"
             )
             self.embedding_model.to(self.device)
-            logger.info(f"Initialized embedding model on device: {self.device}")
 
-            logger.info(
-                f"Successfully initialized models: LLM={llm_model}, Embedding={embedding_model}"
-            )
+            logger.info("Successfully initialized models with PEFT")
             return True
 
         except Exception as e:
@@ -157,11 +186,22 @@ class ProductTrainer:
             raise
 
     def prepare_training_data(self, df: pd.DataFrame, config: Dict) -> Dataset:
+        """Prepare training data with proper validation"""
         try:
+            if len(df) == 0:
+                raise ValueError("Empty dataframe provided")
+
             schema = config["schema_mapping"]
+            required_columns = ["name_column", "description_column", "category_column"]
+
+            # Validate schema
+            for col in required_columns:
+                if not schema.get(col) or schema[col] not in df.columns:
+                    raise ValueError(f"Missing required column: {schema.get(col)}")
+
             training_samples = []
 
-            # Use all columns specified in the config
+            # Process each product
             for _, row in df.iterrows():
                 product_info = {
                     "name": str(row[schema["name_column"]]),
@@ -169,7 +209,7 @@ class ProductTrainer:
                     "category": str(row[schema["category_column"]]),
                 }
 
-                # Add custom columns from config
+                # Add custom columns
                 for col in schema.get("custom_columns", []):
                     if col["user_column"] in row:
                         product_info[col["standard_column"]] = str(
@@ -177,14 +217,15 @@ class ProductTrainer:
                         )
 
                 queries = self._generate_training_queries(product_info)
+                context = self._format_product_context(product_info)
+
                 for query, response in queries:
                     training_samples.append(
-                        {
-                            "query": query,
-                            "context": self._format_product_context(product_info),
-                            "response": response,
-                        }
+                        {"query": query, "context": context, "response": response}
                     )
+
+            if len(training_samples) == 0:
+                raise ValueError("No valid training samples generated")
 
             return Dataset.from_dict(
                 {
@@ -198,44 +239,77 @@ class ProductTrainer:
             logger.error(f"Error preparing training data: {e}")
             raise
 
-    def fine_tune(self, dataset: Dataset, config: Dict, output_dir: str):
+    def fast_train(self, dataset: Dataset, config: Dict, output_dir: str):
+        """Fast training implementation with proper resource management"""
+        if not dataset:
+            raise ValueError("No dataset provided for training")
+
         try:
-            if not self.model or not self.tokenizer:
+            if not self.peft_model or not self.tokenizer:
                 raise ValueError("Models not initialized")
 
-            # Get training parameters from config
+            # Get training parameters
             training_config = config.get("training_config", {})
             batch_size = training_config.get("batch_size", 4)
             max_tokens = training_config.get("max_tokens", 512)
-            validation_split = training_config.get("validation_split", 0.2)
 
-            # Create output directories
+            # Setup directories
             model_output_dir = os.path.join(output_dir, "llm")
-            shared_output_dir = os.path.join(AppConfig.SHARED_MODELS_DIR, output_dir)
-            shared_llm_dir = os.path.join(shared_output_dir, "llm")
+            shared_model_dir = os.path.join(AppConfig.SHARED_MODELS_DIR, output_dir)
+            shared_llm_dir = os.path.join(shared_model_dir, "llm")
 
-            os.makedirs(model_output_dir, exist_ok=True)
-            os.makedirs(shared_llm_dir, exist_ok=True)
+            for dir_path in [model_output_dir, shared_model_dir, shared_llm_dir]:
+                os.makedirs(dir_path, exist_ok=True)
 
-            # Training arguments using config values
+            # Training arguments
             training_args = TrainingArguments(
                 output_dir=model_output_dir,
-                num_train_epochs=5,
+                num_train_epochs=1,
                 per_device_train_batch_size=batch_size,
-                gradient_accumulation_steps=4,
-                learning_rate=2e-5,
-                optim="adamw_torch_fused",
-                max_steps=2000,
-                logging_steps=100,
-                save_steps=500,
-                save_total_limit=2,
+                gradient_accumulation_steps=1,
+                learning_rate=1e-4,
+                max_steps=100,
+                logging_steps=10,
+                save_steps=50,
+                fp16=torch.cuda.is_available(),
+                optim="adamw_torch",
                 remove_unused_columns=False,
                 push_to_hub=False,
                 report_to="none",
-                save_strategy="steps",
-                save_safetensors=False,
-                fp16=True
+                dataloader_num_workers=(
+                    0 if torch.cuda.is_available() else 4
+                ),  # Prevent CUDA fork issues
             )
+
+            # Tokenize dataset
+            tokenized_dataset = self._tokenize_dataset(dataset, max_tokens)
+
+            # Initialize trainer
+            trainer = Trainer(
+                model=self.peft_model,
+                args=training_args,
+                train_dataset=tokenized_dataset,
+                data_collator=DataCollatorForLanguageModeling(
+                    self.tokenizer, mlm=False
+                ),
+            )
+
+            # Train model
+            trainer.train()
+
+            # Save and validate
+            self._save_and_validate_model(trainer, model_output_dir, shared_llm_dir)
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Training error: {e}")
+            self._cleanup_failed_training(model_output_dir, shared_llm_dir)
+            raise
+
+    def _tokenize_dataset(self, dataset: Dataset, max_tokens: int) -> Dataset:
+        """Tokenize dataset with proper CUDA handling"""
+        try:
 
             def tokenize_function(examples):
                 prompts = [
@@ -253,148 +327,166 @@ class ProductTrainer:
                     return_tensors="pt",
                 )
 
-            # Tokenize dataset
-            tokenized_dataset = dataset.map(
-                tokenize_function, batched=True, remove_columns=dataset.column_names
+            # Use single process if CUDA is available to avoid fork issues
+            if torch.cuda.is_available():
+                logger.info("CUDA detected - using single process for tokenization")
+                num_proc = None
+                torch.multiprocessing.set_start_method("spawn", force=True)
+            else:
+                logger.info("Using multiple processes for tokenization")
+                num_proc = os.cpu_count()
+
+            return dataset.map(
+                tokenize_function,
+                batched=True,
+                remove_columns=dataset.column_names,
+                num_proc=num_proc,
             )
-
-            # Initialize trainer
-            trainer = Trainer(
-                model=self.model,
-                args=training_args,
-                train_dataset=tokenized_dataset,
-                data_collator=DataCollatorForLanguageModeling(
-                    self.tokenizer, mlm=False
-                ),
-            )
-
-            # Train model
-            trainer.train()
-
-            # Save model and tokenizer
-            trainer.save_model(model_output_dir)
-            self.tokenizer.save_pretrained(model_output_dir)
-
-            # Export to ONNX format
-            try:
-                self._export_to_onnx(model_output_dir)
-            except Exception as e:
-                logger.warning(f"ONNX export failed: {e}")
-
-            # Copy to shared volume
-            self._copy_model_files(model_output_dir, shared_llm_dir)
-
-            return True
 
         except Exception as e:
-            logger.error(f"Training error: {e}")
+            logger.error(f"Error tokenizing dataset: {e}")
             raise
 
-    def _export_to_onnx(self, model_dir: str):
-        """Export model to ONNX format"""
+    def _save_and_validate_model(self, trainer, model_dir: str, shared_dir: str):
+        """Save and validate model with comprehensive checks"""
         try:
-            dummy_input = self.tokenizer("Sample text", return_tensors="pt")
-            input_names = ["input_ids", "attention_mask"]
-            output_names = ["logits"]
+            # Save model
+            trainer.save_model(model_dir)
+            self.tokenizer.save_pretrained(model_dir)
 
-            # Export to ONNX
-            torch.onnx.export(
-                self.model,
-                (dummy_input["input_ids"], dummy_input["attention_mask"]),
-                f"{model_dir}/model.onnx",
-                input_names=input_names,
-                output_names=output_names,
-                dynamic_axes={
-                    "input_ids": {0: "batch", 1: "sequence"},
-                    "attention_mask": {0: "batch", 1: "sequence"},
-                    "logits": {0: "batch", 1: "sequence"},
-                },
-                opset_version=12,
-            )
-
-            # Verify ONNX model
-            onnx_model = onnx.load(f"{model_dir}/model.onnx")
-            onnx.checker.check_model(onnx_model)
-
-        except Exception as e:
-            logger.error(f"ONNX export failed: {e}")
-            raise
-
-    def _copy_model_files(self, src_dir: str, dest_dir: str):
-        """Copy model files to shared directory"""
-        try:
+            # Verify files
             required_files = [
-                "config.json",
-                "pytorch_model.bin",
+                "adapter_config.json",
+                "adapter_model.bin",
                 "tokenizer.json",
                 "tokenizer_config.json",
                 "special_tokens_map.json",
-                "model.onnx",
             ]
 
+            missing_files = []
             for file in required_files:
-                src_path = os.path.join(src_dir, file)
-                dest_path = os.path.join(dest_dir, file)
-                if os.path.exists(src_path):
-                    os.system(f"cp {src_path} {dest_path}")
+                if not os.path.exists(os.path.join(model_dir, file)):
+                    missing_files.append(file)
+
+            if missing_files:
+                raise ValueError(f"Missing required model files: {missing_files}")
+
+            # Validate model by attempting to reload
+            try:
+                test_model = PeftModel.from_pretrained(
+                    self.model, model_dir, device_map="auto"
+                )
+                test_tokenizer = AutoTokenizer.from_pretrained(model_dir)
+
+                logger.info("Successfully validated model reload")
+
+                # Copy to shared directory
+                for file in os.listdir(model_dir):
+                    shutil.copy2(
+                        os.path.join(model_dir, file), os.path.join(shared_dir, file)
+                    )
+
+            except Exception as e:
+                raise ValueError(f"Model validation failed: {e}")
 
         except Exception as e:
-            logger.error(f"Error copying model files: {e}")
+            logger.error(f"Error saving model: {e}")
             raise
 
-    def generate_embeddings(self, texts: List[str]) -> np.ndarray:
+    def _cleanup_failed_training(self, *dirs):
+        """Clean up resources after failed training"""
+        for dir_path in dirs:
+            try:
+                if os.path.exists(dir_path):
+                    shutil.rmtree(dir_path)
+                    logger.info(f"Cleaned up directory: {dir_path}")
+            except Exception as e:
+                logger.error(f"Failed to clean up {dir_path}: {e}")
+
+    def _format_product_context(self, product_info: Dict) -> str:
+        """Format product information into context string"""
         try:
-            embeddings = self.embedding_model.encode(
-                texts, batch_size=128, show_progress_bar=True, convert_to_tensor=True, device=self.device
-            )
-            return embeddings.cpu().numpy()
+            context = []
+
+            # Add main product information
+            context.append(f"Product: {product_info['name']}")
+            if product_info.get("description"):
+                context.append(f"Description: {product_info['description']}")
+            context.append(f"Category: {product_info['category']}")
+
+            # Add custom fields
+            for key, value in product_info.items():
+                if key not in ["name", "description", "category"] and value:
+                    formatted_key = " ".join(
+                        word.capitalize() for word in key.split("_")
+                    )
+                    context.append(f"{formatted_key}: {value}")
+
+            return "\n".join(context)
 
         except Exception as e:
-            logger.error(f"Error generating embeddings: {e}")
+            logger.error(f"Error formatting product context: {e}")
             raise
 
     def _generate_training_queries(self, product_info: Dict) -> List[Tuple[str, str]]:
         """Generate diverse training queries and responses"""
         queries = []
 
-        # Direct product queries
-        queries.append(
-            (
-                f"Do you have {product_info['name']}?",
-                f"Yes, we have {product_info['name']}. {product_info.get('description', '')}",
-            )
-        )
-
-        # Category queries
-        queries.append(
-            (
-                f"What products do you have in {product_info['category']}?",
-                f"In {product_info['category']}, we have {product_info['name']}. {product_info.get('description', '')}",
-            )
-        )
-
-        # Add price queries if available
-        if "price" in product_info:
-            queries.append(
+        # Add basic queries
+        queries.extend(
+            [
                 (
-                    f"How much is {product_info['name']}?",
-                    f"{product_info['name']} costs {product_info['price']}.",
+                    f"Do you have {product_info['name']}?",
+                    f"Yes, we have {product_info['name']}. {product_info.get('description', '')}",
+                ),
+                (
+                    f"Tell me about {product_info['name']}",
+                    f"{product_info['name']} is {product_info.get('description', '')}. It belongs to the {product_info['category']} category.",
+                ),
+                (
+                    f"What products do you have in {product_info['category']}?",
+                    f"In {product_info['category']}, we have {product_info['name']}. {product_info.get('description', '')}",
+                ),
+            ]
+        )
+
+        # Add custom field queries
+        for key, value in product_info.items():
+            if key not in ["name", "description", "category"] and value:
+                queries.append(
+                    (
+                        f"What is the {key} of {product_info['name']}?",
+                        f"The {key} of {product_info['name']} is {value}.",
+                    )
                 )
-            )
 
         return queries
 
-    def _format_product_context(self, product_info: Dict) -> str:
-        """Format product information into context"""
-        context = []
+    def generate_embeddings(self, texts: List[str]) -> np.ndarray:
+        """Generate embeddings using parallel processing"""
+        try:
+            if not texts:
+                raise ValueError("No texts provided for embedding generation")
 
-        for key, value in product_info.items():
-            if value:
-                # Convert key from snake_case to Title Case
-                formatted_key = " ".join(word.capitalize() for word in key.split("_"))
-                context.append(f"{formatted_key}: {value}")
+            # Process in batches
+            batch_size = 32
+            embeddings = []
 
-        return "\n".join(context)
+            for i in range(0, len(texts), batch_size):
+                batch = texts[i : i + batch_size]
+                with torch.no_grad():
+                    batch_embeddings = self.embedding_model.encode(
+                        batch, convert_to_tensor=True, show_progress_bar=False
+                    )
+                    if isinstance(batch_embeddings, torch.Tensor):
+                        batch_embeddings = batch_embeddings.cpu().numpy()
+                    embeddings.append(batch_embeddings)
+
+            return np.vstack(embeddings)
+
+        except Exception as e:
+            logger.error(f"Error generating embeddings: {e}")
+            raise
 
 
 class RedisManager:
@@ -412,24 +504,35 @@ class RedisManager:
         )
 
     def get_training_job(self) -> Optional[Dict]:
-        """Get next training job from queue"""
-        try:
-            result = self.redis.brpop(AppConfig.TRAINING_QUEUE, timeout=1)
-            if result:
-                _, job_data = result
-                return json.loads(job_data)
-        except Exception as e:
-            logger.error(f"Error getting training job: {e}")
+        """Get next training job from queue with retries"""
+        for attempt in range(AppConfig.MAX_RETRIES):
+            try:
+                result = self.redis.brpop(AppConfig.TRAINING_QUEUE, timeout=1)
+                if result:
+                    _, job_data = result
+                    return json.loads(job_data)
+                return None
+            except Exception as e:
+                if attempt == AppConfig.MAX_RETRIES - 1:
+                    logger.error(f"Error getting training job: {e}")
+                else:
+                    time.sleep(AppConfig.RETRY_DELAY * (attempt + 1))
         return None
 
     def update_status(self, config_id: str, status: Dict):
-        """Update training status in Redis"""
-        try:
-            key = f"{AppConfig.MODEL_STATUS_PREFIX}{config_id}"
-            status["timestamp"] = datetime.now().isoformat()
-            self.redis.set(key, json.dumps(status), ex=86400)  # 24 hour expiry
-        except Exception as e:
-            logger.error(f"Error updating Redis status: {e}")
+        """Update training status in Redis with retries"""
+        key = f"{AppConfig.MODEL_STATUS_PREFIX}{config_id}"
+        status["timestamp"] = datetime.now().isoformat()
+
+        for attempt in range(AppConfig.MAX_RETRIES):
+            try:
+                self.redis.set(key, json.dumps(status), ex=86400)  # 24 hour expiry
+                return
+            except Exception as e:
+                if attempt == AppConfig.MAX_RETRIES - 1:
+                    logger.error(f"Error updating Redis status: {e}")
+                else:
+                    time.sleep(AppConfig.RETRY_DELAY * (attempt + 1))
 
 
 class S3Manager:
@@ -464,7 +567,7 @@ class S3Manager:
         return None
 
     def upload_file(self, local_path: str, s3_path: str) -> bool:
-        """Upload file to S3 with content type and retries"""
+        """Upload file to S3 with content type detection and retries"""
         content_types = {
             ".json": "application/json",
             ".pt": "application/octet-stream",
@@ -497,12 +600,12 @@ class S3Manager:
         return False
 
 
-class ModelTrainer:
+class FastModelTrainer:
     def __init__(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.redis_manager = RedisManager()
         self.s3_manager = S3Manager()
-        self.product_trainer = ProductTrainer()
+        self.product_trainer = FastProductTrainer()
 
     def update_api_status(
         self,
@@ -512,10 +615,9 @@ class ModelTrainer:
         error: str = None,
         model_info: dict = None,
     ):
-        """Update status via API endpoint"""
+        """Update status via API with retries"""
         try:
             update_data = {"status": status, "updated_at": datetime.now().isoformat()}
-
             if progress is not None:
                 update_data["progress"] = progress
             if error:
@@ -530,7 +632,6 @@ class ModelTrainer:
                     response = requests.put(url, json=update_data, timeout=5)
                     if response.status_code == 200:
                         return
-                    logger.error(f"Failed to update status: {response.text}")
                     if attempt < AppConfig.MAX_RETRIES - 1:
                         time.sleep(AppConfig.RETRY_DELAY * (attempt + 1))
                 except Exception as e:
@@ -543,19 +644,19 @@ class ModelTrainer:
             logger.error(f"Error updating status: {e}")
 
     def train(self, job: Dict) -> bool:
+        """Main training function with proper error handling and status updates"""
         config = job["config"]
         config_id = job["config_id"]
 
         try:
-            # Initialize models with config
+            # Initialize models
             self.product_trainer.initialize_models(config)
 
-            # Load data
+            # Load and validate data
             df = self._load_data(config)
             if df is None or len(df) == 0:
                 raise ValueError("No valid training data found")
 
-            # Update status to processing
             self.update_api_status(
                 config_id,
                 ModelStatus.PROCESSING.value,
@@ -567,52 +668,30 @@ class ModelTrainer:
                 },
             )
 
-            # Prepare data for embeddings
+            # Process data and generate embeddings
             texts = self._process_training_data(df, config)
-
-            # Generate embeddings
             embeddings = self.product_trainer.generate_embeddings(texts)
             self.update_api_status(config_id, ModelStatus.PROCESSING.value, progress=30)
 
-            # Prepare training data for LLM
+            # Prepare and train model
             dataset = self.product_trainer.prepare_training_data(df, config)
             self.update_api_status(config_id, ModelStatus.PROCESSING.value, progress=50)
 
-            # Create model directory
-            model_dir = os.path.join(AppConfig.MODEL_CACHE_DIR, config["model_path"])
-            os.makedirs(model_dir, exist_ok=True)
+            # Setup directories
+            cache_dir = os.path.join(AppConfig.MODEL_CACHE_DIR, config["model_path"])
+            shared_dir = os.path.join(AppConfig.SHARED_MODELS_DIR, config["model_path"])
+            os.makedirs(os.path.join(cache_dir, "llm"), exist_ok=True)
+            os.makedirs(os.path.join(shared_dir, "llm"), exist_ok=True)
 
-            # Fine-tune LLM
-            success = self.product_trainer.fine_tune(dataset, config, model_dir)
+            # Train model
+            success = self.product_trainer.fast_train(dataset, config, cache_dir)
             if not success:
-                raise Exception("Model fine-tuning failed")
+                raise Exception("Model training failed")
 
-            self.update_api_status(config_id, ModelStatus.PROCESSING.value, progress=80)
-
-            # Save model artifacts
-            np.save(f"{model_dir}/embeddings.npy", embeddings)
-            df.to_csv(f"{model_dir}/products.csv", index=False)
-
-            metadata = {
-                "timestamp": datetime.now().isoformat(),
-                "config": config,
-                "num_samples": len(df),
-                "embedding_shape": embeddings.shape,
-                "models": {
-                    "llm": config.get("training_config", {}).get(
-                        "llm_model", "distilgpt2"
-                    ),
-                    "embeddings": config.get("training_config", {}).get(
-                        "embedding_model", "all-MiniLM-L6-v2"
-                    ),
-                },
-            }
-
-            with open(f"{model_dir}/metadata.json", "w") as f:
-                json.dump(metadata, f, indent=2)
-
-            # Upload to S3
-            self._upload_model_files(model_dir, config["model_path"])
+            # Save model files and upload to S3
+            self._save_model_files(cache_dir, shared_dir, embeddings, df, config)
+            if not self._upload_model_files(shared_dir, config["model_path"]):
+                raise Exception("Failed to upload model files")
 
             self.update_api_status(
                 config_id,
@@ -633,32 +712,97 @@ class ModelTrainer:
             self.update_api_status(config_id, ModelStatus.FAILED.value, error=error_msg)
             return False
 
+    def _save_model_files(
+        self,
+        cache_dir: str,
+        shared_dir: str,
+        embeddings: np.ndarray,
+        df: pd.DataFrame,
+        config: Dict,
+    ):
+        """Save model files with enhanced verification"""
+        for target_dir in [cache_dir, shared_dir]:
+            try:
+                logger.info(f"Saving model files to {target_dir}")
+                os.makedirs(target_dir, exist_ok=True)
+                llm_dir = os.path.join(target_dir, "llm")
+                os.makedirs(llm_dir, exist_ok=True)
+
+                # Save embeddings and data
+                np.save(os.path.join(target_dir, "embeddings.npy"), embeddings)
+                df.to_csv(os.path.join(target_dir, "products.csv"), index=False)
+
+                # Save metadata
+                metadata = {
+                    "timestamp": datetime.now().isoformat(),
+                    "config": config,
+                    "num_samples": len(df),
+                    "embedding_shape": embeddings.shape,
+                    "models": {
+                        "llm": config.get("training_config", {}).get(
+                            "llm_model", "distilgpt2"
+                        ),
+                        "embeddings": "sentence-transformers/all-MiniLM-L6-v2",
+                    },
+                }
+
+                with open(os.path.join(target_dir, "metadata.json"), "w") as f:
+                    json.dump(metadata, f, indent=2)
+
+                # Verify files
+                required_files = ["embeddings.npy", "products.csv", "metadata.json"]
+                for file in required_files:
+                    if not os.path.exists(os.path.join(target_dir, file)):
+                        raise ValueError(f"Missing required file: {file}")
+
+            except Exception as e:
+                logger.error(f"Error saving files to {target_dir}: {e}")
+                raise
+
+    def _upload_model_files(self, local_dir: str, model_path: str) -> bool:
+        """Upload model files to S3 with verification"""
+        try:
+            files_to_upload = [
+                "embeddings.npy",
+                "metadata.json",
+                "products.csv",
+                "llm/adapter_config.json",
+                "llm/adapter_model.bin",
+                "llm/tokenizer.json",
+            ]
+
+            for file in files_to_upload:
+                local_path = os.path.join(local_dir, file)
+                s3_path = f"{model_path}/{file}"
+
+                if not os.path.exists(local_path):
+                    raise ValueError(f"Required file missing: {file}")
+
+                if not self.s3_manager.upload_file(local_path, s3_path):
+                    raise Exception(f"Failed to upload {file}")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Error uploading model files: {e}")
+            return False
+
     def _load_data(self, config: Dict) -> Optional[pd.DataFrame]:
-        """Load and combine training data"""
+        """Load training data with validation"""
         try:
             data_source = config["data_source"]
             current_file = data_source["location"]
 
-            # Load current data
             current_df = self.s3_manager.get_csv_content(current_file)
             if current_df is None:
-                raise ValueError(f"Failed to load current CSV from {current_file}")
+                raise ValueError(f"Failed to load CSV from {current_file}")
 
             # Handle append mode
             if config["mode"] == "append" and config.get("previous_version"):
-                try:
-                    prev_path = f"models/{config['previous_version']}/products.csv"
-                    prev_df = self.s3_manager.get_csv_content(prev_path)
-                    if prev_df is not None:
-                        current_df = pd.concat([prev_df, current_df], ignore_index=True)
-                        logger.info(
-                            f"Appended previous data. Total records: {len(current_df)}"
-                        )
-                except Exception as e:
-                    logger.error(f"Error loading previous version data: {e}")
-                    raise ValueError(
-                        "Failed to load previous version data for append mode"
-                    )
+                prev_path = f"models/{config['previous_version']}/products.csv"
+                prev_df = self.s3_manager.get_csv_content(prev_path)
+                if prev_df is not None:
+                    current_df = pd.concat([prev_df, current_df], ignore_index=True)
 
             return current_df
 
@@ -667,7 +811,7 @@ class ModelTrainer:
             raise
 
     def _process_training_data(self, df: pd.DataFrame, config: Dict) -> List[str]:
-        """Process training data for embedding generation"""
+        """Process training data for embeddings"""
         try:
             schema = config["schema_mapping"]
             text_parts = []
@@ -677,7 +821,7 @@ class ModelTrainer:
                 if schema.get(column) and schema[column] in df.columns:
                     text_parts.append(df[schema[column]].fillna("").astype(str))
 
-            # Process custom columns marked for training
+            # Process custom columns
             for col in schema.get("custom_columns", []):
                 if col["role"] == "training" and col["user_column"] in df.columns:
                     text_parts.append(df[col["user_column"]].fillna("").astype(str))
@@ -685,47 +829,16 @@ class ModelTrainer:
             if not text_parts:
                 raise ValueError("No valid columns found for text processing")
 
-            texts = [" ".join(filter(None, row)) for row in zip(*text_parts)]
-            logger.info(f"Processed {len(texts)} text samples")
-            return texts
+            return [" ".join(filter(None, row)) for row in zip(*text_parts)]
 
         except Exception as e:
             logger.error(f"Error processing training data: {e}")
             raise
 
-    def _upload_model_files(self, local_dir: str, model_path: str) -> bool:
-        """Upload all model files to S3"""
-        try:
-            files_to_upload = [
-                "embeddings.npy",
-                "metadata.json",
-                "products.csv",
-                "llm/config.json",
-                "llm/pytorch_model.bin",
-                "llm/tokenizer.json",
-                "llm/model.onnx",
-            ]
-
-            for file in files_to_upload:
-                local_path = os.path.join(local_dir, file)
-                s3_path = f"{model_path}/{file}"
-
-                if os.path.exists(local_path):
-                    if not self.s3_manager.upload_file(local_path, s3_path):
-                        raise Exception(f"Failed to upload {file}")
-                else:
-                    logger.warning(f"File not found for upload: {local_path}")
-
-            return True
-
-        except Exception as e:
-            logger.error(f"Error uploading model files: {e}")
-            raise
-
 
 class TrainingWorker:
     def __init__(self):
-        self.trainer = ModelTrainer()
+        self.trainer = FastModelTrainer()
         self.redis_manager = RedisManager()
         self.should_stop = False
         self.current_job = None
@@ -739,11 +852,7 @@ class TrainingWorker:
         except Exception as e:
             logger.error(f"Error processing job: {e}")
             self.redis_manager.update_status(
-                job["config_id"],
-                {
-                    "status": ModelStatus.FAILED.value,
-                    "error": str(e),
-                },
+                job["config_id"], {"status": ModelStatus.FAILED.value, "error": str(e)}
             )
 
     def _worker_loop(self):
@@ -784,6 +893,7 @@ class TrainingWorker:
 worker = TrainingWorker()
 
 
+# Flask routes
 @app.route("/health")
 def health():
     """Health check endpoint"""
@@ -817,7 +927,6 @@ def get_status(config_id):
         if status:
             return jsonify(json.loads(status))
 
-        # If no status in Redis, check current job
         if worker.current_job and worker.current_job["config_id"] == config_id:
             return jsonify(
                 {
@@ -831,6 +940,54 @@ def get_status(config_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+@app.route("/queue")
+def get_queue_status():
+    """Get current queue status"""
+    try:
+        queue_length = worker.redis_manager.redis.llen(AppConfig.TRAINING_QUEUE)
+        jobs = []
+
+        if queue_length > 0:
+            job_data = worker.redis_manager.redis.lrange(
+                AppConfig.TRAINING_QUEUE, 0, -1
+            )
+            for job in job_data:
+                try:
+                    parsed_job = json.loads(job)
+                    jobs.append(
+                        {
+                            "config_id": parsed_job["config_id"],
+                            "timestamp": parsed_job.get("timestamp", "unknown"),
+                            "config": {
+                                "name": parsed_job["config"].get("name", "Unnamed"),
+                                "model_path": parsed_job["config"].get(
+                                    "model_path", "unknown"
+                                ),
+                                "mode": parsed_job["config"].get("mode", "replace"),
+                            },
+                        }
+                    )
+                except json.JSONDecodeError:
+                    continue
+
+        return jsonify(
+            {
+                "queue_length": queue_length,
+                "current_job": (
+                    {
+                        "config_id": worker.current_job["config_id"],
+                        "config": worker.current_job["config"],
+                    }
+                    if worker.current_job
+                    else None
+                ),
+                "queued_jobs": jobs,
+            }
+        )
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/control/start", methods=["POST"])

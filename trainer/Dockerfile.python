@@ -4,11 +4,14 @@ FROM ${BASE_IMAGE} as base
 # Create non-root user and setup directories
 RUN useradd -ms /bin/bash appuser && \
     chown -R appuser:appuser /app
+RUN pip3 uninstall numpy -y
 
 # Install service-specific dependencies
 COPY requirements.service.txt .
 RUN pip3 install --no-cache-dir -r requirements.service.txt && \
     rm requirements.service.txt
+
+
 
 USER appuser
 
