@@ -781,7 +781,7 @@ class FastModelTrainer:
             current_df = self.s3_manager.get_csv_content(current_file)
             if current_df is None:
                 raise ValueError(f"Failed to load CSV from {current_file}")
-
+ 
             # Handle append mode
             if config["mode"] == "append" and config.get("previous_version"):
                 prev_path = f"models/{config['previous_version']}/products.csv"
