@@ -545,3 +545,8 @@ func isValidCSVFile(header *multipart.FileHeader) bool {
 	ext := path.Ext(header.Filename)
 	return ext == ".csv"
 }
+func (s *ConfigService) GetAvailableLLMModels(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"models": cfg.AvailableLLMModels,
+	})
+}

@@ -1,14 +1,15 @@
+
+import ChatBot from './ChatBot';
 import Link from 'next/link';
 import { useRouter } from 'next/router';
 import { useState } from 'react';
-import { Menu, X, Search, Plus, Clock, Home } from 'lucide-react';
+import { Menu, X, Search, Plus, Clock, Home, List, User } from 'lucide-react';
 
 export default function NavBar() {
     const [isOpen, setIsOpen] = useState(false);
     const router = useRouter();
 
     const navItems = [
-        { href: '/', label: 'Home', icon: Home },
         { href: '/search', label: 'Search Models', icon: Search },
         { href: '/create-config', label: 'Create Config', icon: Plus },
         { href: '/pending-jobs', label: 'Pending Jobs', icon: Clock },
@@ -23,8 +24,7 @@ export default function NavBar() {
                 <div className="flex justify-between h-16">
                     {/* Logo/Brand */}
                     <div className="flex items-center">
-                        <Link href="/" 
-                            className="flex items-center text-white font-bold text-xl">
+                        <Link href="/" className="flex items-center text-white font-bold text-xl">
                             PlayGround
                         </Link>
                     </div>
@@ -84,7 +84,9 @@ export default function NavBar() {
                         </Link>
                     ))}
                 </div>
+
             </div>
+            <ChatBot />
         </nav>
     );
 }

@@ -1,32 +1,38 @@
-import * as React from "react"
-import { cn } from "@/lib/utils"
+import React from 'react';
+import PropTypes from 'prop-types';
 
-const Alert = React.forwardRef<
-  HTMLDivElement,
-  React.HTMLAttributes<HTMLDivElement>
->(({ className, ...props }, ref) => (
-  <div
-    ref={ref}
-    role="alert"
-    className={cn(
-      "relative w-full rounded-lg border p-4",
-      className
-    )}
-    {...props}
-  />
-))
-Alert.displayName = "Alert"
+export const Alert = ({ children, variant }) => {
+  const variantClasses = {
+    destructive: 'bg-red-50 border border-red-200 text-red-700',
+    warning: 'bg-yellow-50 border border-yellow-200 text-yellow-700',
+    info: 'bg-blue-50 border border-blue-200 text-blue-700',
+    success: 'bg-green-50 border border-green-200 text-green-700',
+  };
 
-const AlertDescription = React.forwardRef<
-  HTMLParagraphElement,
-  React.HTMLAttributes<HTMLParagraphElement>
->(({ className, ...props }, ref) => (
-  <div
-    ref={ref}
-    className={cn("text-sm [&_p]:leading-relaxed", className)}
-    {...props}
-  />
-))
-AlertDescription.displayName = "AlertDescription"
+  return (
+    <div className={`p-4 rounded-lg ${variantClasses[variant] || variantClasses.info}`}>
+      {children}
+    </div>
+  );
+};
 
-export { Alert, AlertDescription }
+Alert.propTypes = {
+  children: PropTypes.node.isRequired,
+  variant: PropTypes.oneOf(['destructive', 'warning', 'info', 'success']),
+};
+
+export const AlertTitle = ({ children }) => (
+  <h3 className="font-semibold mb-2">{children}</h3>
+);
+
+AlertTitle.propTypes = {
+  children: PropTypes.node.isRequired,
+};
+
+export const AlertDescription = ({ children }) => (
+  <p>{children}</p>
+);
+
+AlertDescription.propTypes = {
+  children: PropTypes.node.isRequired,
+};

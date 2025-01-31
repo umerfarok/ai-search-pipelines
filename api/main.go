@@ -81,18 +81,15 @@ func setupRouter(configService *handlers.ConfigService, searchService *handlers.
 			"time":   time.Now().UTC(),
 		})
 	})
-
-	// Config endpoints
 	r.POST("/config", configService.CreateConfig)
 	r.GET("/config/:id", configService.GetConfig)
 	r.GET("/config", configService.ListConfigs)
-	r.GET("/config/status/:id", configService.GetTrainingStatus)
+	r.GET("/config/status/:id", configService.GetTrainingStatus) 
 	r.PUT("/config/status/:id", configService.UpdateConfigStatus)
 
-	// Queue monitoring
+	r.GET("/config/llm-models", configService.GetAvailableLLMModels)
 	r.GET("/queue", configService.GetQueuedJobs)
 
-	// Search endpoints
 	if searchService != nil {
 		r.POST("/search", searchService.Search)
 	}
@@ -101,7 +98,6 @@ func setupRouter(configService *handlers.ConfigService, searchService *handlers.
 }
 
 func main() {
-	// Load .env file if it exists
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found")
 	}
@@ -113,7 +109,7 @@ func main() {
 	}
 
 	// Initialize MongoDB
-	db, err := initMongoDB() 
+	db, err := initMongoDB()
 	if err != nil {
 		log.Fatalf("Failed to connect to MongoDB: %v", err)
 	}

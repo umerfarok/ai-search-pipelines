@@ -1,59 +1,41 @@
-ARG PYTHON_VERSION=3.9
-ARG BUILD_TYPE=cpu
-ARG PYTORCH_INDEX=https://download.pytorch.org/whl/cpu
+ARG BASE_IMAGE=ml-base:latest
+FROM ${BASE_IMAGE} as base
 
-FROM python:${PYTHON_VERSION}-slim as base
+# Create app user with flexible UID/GID
+ARG USER_ID=1000
+ARG GROUP_ID=1000
 
+RUN groupadd -g ${GROUP_ID} appuser && \
+    useradd -u ${USER_ID} -g appuser -m -s /bin/bash appuser
+
+# Create and set permissions for all required directories
+RUN mkdir -p /app/{models,model_cache,s3_cache} && \
+    mkdir -p /app/model_cache/{transformers,huggingface} && \
+    mkdir -p /app/model_cache/huggingface/datasets && \
+    mkdir -p /app/shared_models && \
+    chown -R appuser:appuser /app && \
+    chmod -R 755 /app
+
+RUN pip3 uninstall numpy -y
+
+    # Install dependencies
+COPY --chown=appuser:appuser requirements.service.txt .
+RUN pip3 install --no-cache-dir -r requirements.service.txt
+
+# Switch to appuser and set up cache directories
+USER appuser
 WORKDIR /app
 
-# Install system dependencies and cleanup in a single layer
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    curl \
-    git \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+# Set cache environment variables
+ENV TRANSFORMERS_CACHE="/app/model_cache/transformers" \
+    HF_HOME="/app/model_cache/huggingface" \
+    TORCH_HOME="/app/model_cache" \
+    XDG_CACHE_HOME="/app/model_cache"
 
-# Create non-root user
-RUN adduser --disabled-password --gecos '' appuser && \
-    mkdir -p /app/models /app/data && \
-    chown -R appuser:appuser /app
-
-# Set Python environment variables
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_RETRIES=10 \
-    PIP_TIMEOUT=100 \
-    PIP_DEFAULT_TIMEOUT=100
-
-FROM base as builder
-
-ARG BUILD_TYPE
-ARG PYTORCH_INDEX
-
-# Copy requirements first for better caching
-COPY requirements.txt .
-
-# Install dependencies with retry logic and increased timeout
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir torch --index-url ${PYTORCH_INDEX} --timeout 100 && \
-    pip install --no-cache-dir -r requirements.txt --timeout 100
-
-FROM builder as dev
-
-USER appuser
-
-# Keep container running for development
-CMD ["tail", "-f", "/dev/null"]
-
-FROM builder as prod
-
+# Copy application files
+FROM base as prod
 COPY --chown=appuser:appuser . .
 
 USER appuser
-
-# Default command (will be overridden by docker-compose)
-CMD ["python", "app.py"]
+CMD ["python3", "app.py"]
 

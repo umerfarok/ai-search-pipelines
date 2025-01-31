@@ -1,21 +1,38 @@
-// components/ui/Alert.js
 import React from 'react';
+import PropTypes from 'prop-types';
 
-export const Alert = ({ children, type = 'info' }) => {
-    const alertStyles = {
-        info: 'bg-blue-100 border-blue-500 text-blue-700',
-        success: 'bg-green-100 border-green-500 text-green-700',
-        warning: 'bg-yellow-100 border-yellow-500 text-yellow-700',
-        error: 'bg-red-100 border-red-500 text-red-700',
-    };
+export const Alert = ({ children, variant }) => {
+  const variantClasses = {
+    destructive: 'bg-red-50 border border-red-200 text-red-700',
+    warning: 'bg-yellow-50 border border-yellow-200 text-yellow-700',
+    info: 'bg-blue-50 border border-blue-200 text-blue-700',
+    success: 'bg-green-50 border border-green-200 text-green-700',
+  };
 
-    return (
-        <div className={`border-l-4 p-4 ${alertStyles[type]}`} role="alert">
-            {children}
-        </div>
-    );
+  return (
+    <div className={`p-4 rounded-lg ${variantClasses[variant] || variantClasses.info}`}>
+      {children}
+    </div>
+  );
 };
 
-export const AlertDescription = ({ children }) => {
-    return <p className="text-sm">{children}</p>;
+Alert.propTypes = {
+  children: PropTypes.node.isRequired,
+  variant: PropTypes.oneOf(['destructive', 'warning', 'info', 'success']),
+};
+
+export const AlertTitle = ({ children }) => (
+  <h3 className="font-semibold mb-2">{children}</h3>
+);
+
+AlertTitle.propTypes = {
+  children: PropTypes.node.isRequired,
+};
+
+export const AlertDescription = ({ children }) => (
+  <p>{children}</p>
+);
+
+AlertDescription.propTypes = {
+  children: PropTypes.node.isRequired,
 };

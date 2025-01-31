@@ -39,7 +39,7 @@ const useModelSearch = () => {
             if (!response.ok) throw new Error('Failed to fetch models');
             const data = await response.json();
             setModels(data.configs);
-        } catch (err) {
+        } catch (err) { 
             setError(err.message);
         } finally {
             setLoading(false);
