@@ -71,9 +71,9 @@ services:
       PYTORCH_NO_CUDA_MEMORY_CACHING: "1"  # Add this
       S3_CACHE_DIR: /app/s3_cache
       TEMP_DIR: /tmp/search
-      # Add these for better CUDA stability
       CUDA_DEVICE_MAX_CONNECTIONS: "1"
       NCCL_P2P_DISABLE: "1"
+      MODEL_LOAD_DIR: /app/models/models  # Add explicit load directory
     ports:
       - "5000:5000"
     command: ["python", "search_service.py"]
@@ -91,13 +91,18 @@ services:
       - type: bind
         source: ./models
         target: /app/models
+        consistency: cached
       - type: bind
         source: ./cache/temp
         target: /tmp/search
       - type: bind
         source: ./cache/s3_cache
         target: /app/s3_cache
-    user: "1000:1000"  # Add this line to match your host user ID
+      - type: bind
+        source: ./cache/model_cache
+        target: /app/model_cache
+        consistency: cached
+    user: "${UID:-1000}:${GID:-1000}"  # Use host user/group IDs
     entrypoint: >
       /bin/sh -c "
       python search_service.py
@@ -147,6 +152,7 @@ services:
       CUDA_LAUNCH_BLOCKING: "1"  # For better error reporting
       TORCH_USE_CUDA_DSA: "1"    # Enable device-side assertions
       PYTORCH_CUDA_ALLOC_CONF: "max_split_size_mb:512"  # Help prevent memory fragmentation
+      MODEL_SAVE_DIR: /app/models/models  # Add explicit save directory
     ports:
       - "5001:5001"
     command: ["python", "training_service.py"]
@@ -164,12 +170,17 @@ services:
       - type: bind
         source: ./models
         target: /app/models
+        consistency: cached
       - type: bind
         source: ./cache/temp
         target: /tmp/training
+      - type: bind
+        source: ./cache/model_cache
+        target: /app/model_cache
+        consistency: cached
     tmpfs:
       - /tmp:exec,size=4G  # Add more temp space
-    user: "1000:1000"  # Add this line to match your host user ID
+    user: "${UID:-1000}:${GID:-1000}"  # Use host user/group IDs
     entrypoint: >
       /bin/sh -c "
       python training_service.py

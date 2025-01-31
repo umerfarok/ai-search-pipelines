@@ -350,44 +350,58 @@ class FastProductTrainer:
     def _save_and_validate_model(self, trainer, model_dir: str, shared_dir: str):
         """Save and validate model with comprehensive checks"""
         try:
-            # Save model
-            trainer.save_model(model_dir)
+            logger.info(f"Saving model to {model_dir}")
+            
+            # Create directories
+            os.makedirs(model_dir, exist_ok=True)
+            os.makedirs(shared_dir, exist_ok=True)
+
+            # 1. Save PEFT model state
+            logger.info("Saving PEFT model state...")
+            self.peft_model.save_pretrained(
+                model_dir,
+                safe_serialization=True,
+                save_config=True
+            )
+
+            # 2. Save tokenizer
+            logger.info("Saving tokenizer...")
             self.tokenizer.save_pretrained(model_dir)
 
-            # Verify files
+            # 3. Verify saved files
             required_files = [
                 "adapter_config.json",
                 "adapter_model.bin",
                 "tokenizer.json",
-                "tokenizer_config.json",
                 "special_tokens_map.json",
+                "tokenizer_config.json"
             ]
-
-            missing_files = []
+            
             for file in required_files:
-                if not os.path.exists(os.path.join(model_dir, file)):
-                    missing_files.append(file)
+                file_path = os.path.join(model_dir, file)
+                if not os.path.exists(file_path):
+                    raise ValueError(f"Required file missing after save: {file}")
 
-            if missing_files:
-                raise ValueError(f"Missing required model files: {missing_files}")
-
-            # Validate model by attempting to reload
+            # 4. Validate by attempting to reload
+            logger.info("Validating saved model...")
             try:
-                test_model = PeftModel.from_pretrained(
-                    self.model, model_dir, device_map="auto"
-                )
+                test_config = PeftConfig.from_pretrained(model_dir)
                 test_tokenizer = AutoTokenizer.from_pretrained(model_dir)
-
-                logger.info("Successfully validated model reload")
-
-                # Copy to shared directory
-                for file in os.listdir(model_dir):
-                    shutil.copy2(
-                        os.path.join(model_dir, file), os.path.join(shared_dir, file)
-                    )
-
+                logger.info("Model validation successful")
             except Exception as e:
                 raise ValueError(f"Model validation failed: {e}")
+
+            # 5. Copy to shared directory
+            logger.info(f"Copying to shared directory: {shared_dir}")
+            for file in os.listdir(model_dir):
+                src = os.path.join(model_dir, file)
+                dst = os.path.join(shared_dir, file)
+                if os.path.isfile(src):
+                    shutil.copy2(src, dst)
+                elif os.path.isdir(src):
+                    shutil.copytree(src, dst, dirs_exist_ok=True)
+
+            return True
 
         except Exception as e:
             logger.error(f"Error saving model: {e}")

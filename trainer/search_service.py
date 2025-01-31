@@ -243,13 +243,14 @@ class ProductSearchManager:
         self.model_load_lock = threading.Lock()
 
     def load_models(self, model_path: str) -> bool:
-        """Load models with PEFT support and version handling"""
+        """Load models with enhanced PEFT support and validation"""
         with self.model_load_lock:
             try:
                 shared_path = os.path.join(AppConfig.SHARED_MODELS_DIR, model_path)
                 llm_path = os.path.join(shared_path, "llm")
+                logger.info(f"Loading models from {shared_path}")
 
-                # Load metadata to check version and configuration
+                # Load and validate metadata
                 metadata_path = os.path.join(shared_path, "metadata.json")
                 if not os.path.exists(metadata_path):
                     raise ValueError(f"Metadata not found in {shared_path}")
@@ -257,117 +258,133 @@ class ProductSearchManager:
                 with open(metadata_path, "r") as f:
                     metadata = json.load(f)
 
-                # Check if PEFT is used
-                is_peft_model = os.path.exists(
-                    os.path.join(llm_path, "adapter_config.json")
-                )
-                logger.info(
-                    f"Loading {'PEFT' if is_peft_model else 'standard'} model from {llm_path}"
-                )
+                # Verify PEFT configuration
+                peft_config_path = os.path.join(llm_path, "adapter_config.json")
+                is_peft_model = os.path.exists(peft_config_path)
 
-                # Try ONNX first
-                onnx_path = os.path.join(llm_path, "model.onnx")
-                if os.path.exists(onnx_path):
-                    try:
-                        self.onnx_session = ort.InferenceSession(
-                            onnx_path,
-                            providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
-                        )
-                        logger.info("Successfully loaded ONNX model")
-                        return True
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to load ONNX model: {e}. Falling back to regular model."
-                        )
+                # Initialize tokenizer first
+                tokenizer_path = os.path.join(llm_path, "tokenizer.json")
+                if not os.path.exists(tokenizer_path):
+                    raise ValueError("Tokenizer not found")
 
-                # Load tokenizer
                 self.tokenizer = AutoTokenizer.from_pretrained(llm_path)
                 if self.tokenizer.pad_token is None:
                     self.tokenizer.pad_token = self.tokenizer.eos_token
 
-                # Handle PEFT model
+                # Load base model
+                base_model_name = metadata.get("models", {}).get("llm", "distilgpt2")
+                model_kwargs = {
+                    "device_map": "auto",
+                    "torch_dtype": torch.float16 if torch.cuda.is_available() else torch.float32,
+                    "low_cpu_mem_usage": True
+                }
+
                 if is_peft_model:
+                    logger.info("Loading PEFT model...")
                     # Load base model first
-                    base_model_name = metadata.get("models", {}).get(
-                        "llm", "distilgpt2"
-                    )
                     self.base_model = AutoModelForCausalLM.from_pretrained(
                         base_model_name,
-                        device_map="auto",
-                        torch_dtype=(
-                            torch.float16
-                            if torch.cuda.is_available()
-                            else torch.float32
-                        ),
+                        **model_kwargs
                     )
-
+                    
                     # Load PEFT adapter
+                    if not os.path.exists(os.path.join(llm_path, "adapter_model.bin")):
+                        raise ValueError("PEFT adapter weights not found")
+
                     self.peft_model = PeftModel.from_pretrained(
                         self.base_model,
                         llm_path,
-                        is_trainable=False,  # Set to False for inference
+                        is_trainable=False,
+                        torch_dtype=model_kwargs["torch_dtype"]
                     )
                     self.peft_model.eval()
                 else:
-                    # Load regular model
+                    logger.info("Loading standard model...")
                     self.base_model = AutoModelForCausalLM.from_pretrained(
                         llm_path,
-                        device_map="auto",
-                        torch_dtype=(
-                            torch.float16
-                            if torch.cuda.is_available()
-                            else torch.float32
-                        ),
+                        **model_kwargs
                     )
                     self.base_model.eval()
 
+                # Try loading ONNX model if available
+                onnx_path = os.path.join(llm_path, "model.onnx")
+                if os.path.exists(onnx_path):
+                    try:
+                        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+                        self.onnx_session = ort.InferenceSession(
+                            onnx_path,
+                            providers=providers
+                        )
+                        logger.info("Successfully loaded ONNX model")
+                    except Exception as e:
+                        logger.warning(f"Failed to load ONNX model: {e}")
+                        self.onnx_session = None
+
                 # Load embedding model
                 embedding_model_name = metadata.get("models", {}).get(
-                    "embeddings",
-                    AppConfig.AVAILABLE_LLM_MODELS["all-minilm-l6"]["name"],
+                    "embeddings", "sentence-transformers/all-MiniLM-L6-v2"
                 )
                 self.embedding_model = SentenceTransformer(embedding_model_name)
                 self.embedding_model.to(self.device)
 
-                logger.info(f"Successfully loaded all models from {model_path}")
+                logger.info(
+                    f"Successfully loaded models: PEFT={is_peft_model}, "
+                    f"ONNX={'available' if self.onnx_session else 'not available'}"
+                )
                 return True
 
             except Exception as e:
                 logger.error(f"Error loading models: {e}")
                 self._cleanup_failed_load()
-                return False
+                raise
 
     def _cleanup_failed_load(self):
-        """Cleanup resources after failed model loading"""
+        """Enhanced cleanup of failed model loading"""
         try:
-            if self.peft_model:
-                del self.peft_model
-            if self.base_model:
-                del self.base_model
-            if self.onnx_session:
-                del self.onnx_session
+            models_to_clean = [
+                (self.peft_model, "PEFT model"),
+                (self.base_model, "Base model"),
+                (self.onnx_session, "ONNX session")
+            ]
+
+            for model, name in models_to_clean:
+                if model is not None:
+                    try:
+                        del model
+                        logger.info(f"Cleaned up {name}")
+                    except Exception as e:
+                        logger.warning(f"Error cleaning up {name}: {e}")
 
             self.peft_model = None
             self.base_model = None
             self.onnx_session = None
 
             if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+                try:
+                    torch.cuda.empty_cache()
+                    logger.info("Cleared CUDA cache")
+                except Exception as e:
+                    logger.warning(f"Error clearing CUDA cache: {e}")
 
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
 
     def generate_response(self, query: str, product_context: str) -> str:
-        """Generate response using appropriate model"""
+        """Generate response using appropriate model with fallback"""
         try:
+            # Try ONNX first, then PEFT, then base model
             if self.onnx_session:
-                return self._generate_response_onnx(query, product_context)
-            elif self.peft_model:
+                try:
+                    return self._generate_response_onnx(query, product_context)
+                except Exception as e:
+                    logger.warning(f"ONNX generation failed, falling back to PEFT/base: {e}")
+
+            if self.peft_model:
                 return self._generate_response_peft(query, product_context)
             elif self.base_model:
                 return self._generate_response_base(query, product_context)
             else:
-                raise ValueError("No model loaded")
+                raise ValueError("No model available for generation")
 
         except Exception as e:
             logger.error(f"Error generating response: {e}")
