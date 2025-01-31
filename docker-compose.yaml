@@ -104,7 +104,7 @@ services:
         source: ./cache/model_cache
         target: /app/model_cache
         consistency: cached
-    user: "1000:1000"  # Explicit user mapping
+    user: "${UID:-1000}:${GID:-1000}"  # Explicit user mapping
     entrypoint: >
       /bin/sh -c "
       python search_service.py
@@ -183,7 +183,7 @@ services:
         consistency: cached
     tmpfs:
       - /tmp:exec,size=4G  # Add more temp space
-    user: "1000:1000"  # Explicit user mapping
+    user: "${UID:-1000}:${GID:-1000}"  # Explicit user mapping
     entrypoint: >
       /bin/sh -c "
       python training_service.py

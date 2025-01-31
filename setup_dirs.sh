@@ -1,14 +1,22 @@
 #!/bin/bash
 
-# Create required directories
-mkdir -p models
-mkdir -p cache/model_cache/transformers
-mkdir -p cache/model_cache/huggingface
-mkdir -p cache/temp
-mkdir -p cache/s3_cache
+# Get current user's UID and GID
+export UID=$(id -u)
+export GID=$(id -g)
 
-# Set permissions (replace 1000 with your actual UID if different)
-sudo chown -R 1000:1000 models
-sudo chown -R 1000:1000 cache
-sudo chmod -R 755 models
-sudo chmod -R 755 cache
+# Create base directories
+mkdir -p {models,cache}/{models,model_cache,s3_cache,temp}
+mkdir -p cache/model_cache/{transformers,huggingface}
+mkdir -p cache/model_cache/huggingface/datasets
+
+# Set permissions for all directories
+for dir in models cache; do
+  sudo chown -R ${UID}:${GID} $dir
+  sudo chmod -R 755 $dir
+done
+
+# Create environment file
+cat > .env << EOF
+UID=${UID}
+GID=${GID}
+EOF
