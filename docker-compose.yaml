@@ -268,16 +268,12 @@ volumes:
       type: none
       o: bind
       device: ./cache/models
-      uid: "1000"
-      gid: "1000"
   s3_cache:
     driver: local
     driver_opts:
       type: none
       o: bind
       device: ./cache/s3_cache
-      uid: "1000"
-      gid: "1000"
 
 networks:
   app-network:
