@@ -289,6 +289,14 @@ networks:
   app-network:
 
 volumes:
+  models:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./models
+      uid: "${UID:-1000}"
+      gid: "${GID:-1000}"
   mongodb_data:
     driver: local
   redis_data:

@@ -45,6 +45,8 @@ class AppConfig:
     DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
     MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", 3))
     RETRY_DELAY: int = int(os.getenv("RETRY_DELAY", 1))
+
+    # Model configurations
     AVAILABLE_LLM_MODELS = {
         "distilgpt2-product": {
             "name": "distilgpt2",
@@ -57,32 +59,24 @@ class AppConfig:
             "peft_supported": False,
         },
     }
-    PEFT_CONFIG = {
-        "r": 8,
-        "lora_alpha": 32,
-        "lora_dropout": 0.1,
-        "bias": "none",
-        "task_type": "CAUSAL_LM",
-    }
     DEFAULT_MODEL = "distilgpt2-product"
 
-    # Cache and storage paths
-    SHARED_MODELS_DIR: str = os.getenv("SHARED_MODELS_DIR", "/app/models")
-    MODEL_CACHE_DIR: str = os.getenv("MODEL_CACHE_DIR", "/app/models/cache")
+    # Simplified directory structure
+    BASE_MODEL_DIR: str = os.getenv("BASE_MODEL_DIR", "/app/models")
+    MODEL_CACHE_DIR: str = os.getenv("MODEL_CACHE_DIR", "/app/model_cache")
     TRANSFORMER_CACHE: str = os.getenv(
         "TRANSFORMER_CACHE", "/app/model_cache/transformers"
     )
     HF_HOME: str = os.getenv("HF_HOME", "/app/model_cache/huggingface")
-    ONNX_CACHE_DIR: str = os.getenv("ONNX_CACHE_DIR", "/app/models/onnx")
 
     @classmethod
     def setup_cache_dirs(cls):
-        """Setup all required cache directories"""
+        """Setup cache directories"""
         directories = [
+            cls.BASE_MODEL_DIR,
             cls.MODEL_CACHE_DIR,
             cls.TRANSFORMER_CACHE,
             cls.HF_HOME,
-            cls.ONNX_CACHE_DIR,
             os.path.join(cls.HF_HOME, "datasets"),
         ]
 
@@ -97,7 +91,6 @@ class AppConfig:
                 "HF_DATASETS_CACHE": os.path.join(cls.HF_HOME, "datasets"),
             }
         )
-
 
 class ModelCache:
     def __init__(self, max_size: int = 4):
@@ -208,35 +201,40 @@ class ProductSearchManager:
         self.model_load_lock = threading.Lock()
 
     def load_models(self, model_path: str) -> bool:
-        """Load models with enhanced PEFT support and validation"""
+        """Load models with simplified path structure"""
         with self.model_load_lock:
             try:
-                shared_path = os.path.join(AppConfig.SHARED_MODELS_DIR, model_path)
-                llm_path = os.path.join(shared_path, "llm")
-                logger.info(f"Loading models from {shared_path}")
+                model_dir = os.path.join(AppConfig.BASE_MODEL_DIR, model_path)
+                llm_dir = os.path.join(model_dir, "llm")
+                logger.info(f"Loading models from {model_dir}")
 
-                # Load and validate metadata
-                metadata_path = os.path.join(shared_path, "metadata.json")
+                # Load metadata
+                metadata_path = os.path.join(model_dir, "metadata.json")
                 if not os.path.exists(metadata_path):
-                    raise ValueError(f"Metadata not found in {shared_path}")
+                    raise ValueError(f"Metadata not found in {model_dir}")
 
                 with open(metadata_path, "r") as f:
                     metadata = json.load(f)
 
-                # Verify PEFT configuration
-                peft_config_path = os.path.join(llm_path, "adapter_config.json")
-                is_peft_model = os.path.exists(peft_config_path)
+                # Verify PEFT configuration and adapter file
+                peft_config_path = os.path.join(llm_dir, "adapter_config.json")
+                peft_model_path = os.path.join(llm_dir, "adapter_model.bin")
 
-                # Initialize tokenizer first
-                tokenizer_path = os.path.join(llm_path, "tokenizer.json")
+                is_peft_model = os.path.exists(peft_config_path) and os.path.exists(
+                    peft_model_path
+                )
+
+                # Initialize tokenizer
+                tokenizer_path = os.path.join(llm_dir, "tokenizer.json")
                 if not os.path.exists(tokenizer_path):
                     raise ValueError("Tokenizer not found")
 
-                self.tokenizer = AutoTokenizer.from_pretrained(llm_path)
+                self.tokenizer = AutoTokenizer.from_pretrained(llm_dir)
                 if self.tokenizer.pad_token is None:
                     self.tokenizer.pad_token = self.tokenizer.eos_token
+                    self.tokenizer.padding_side = "left"
 
-                # Load base model
+                # Load models
                 base_model_name = metadata.get("models", {}).get("llm", "distilgpt2")
                 model_kwargs = {
                     "device_map": "auto",
@@ -248,18 +246,13 @@ class ProductSearchManager:
 
                 if is_peft_model:
                     logger.info("Loading PEFT model...")
-                    # Load base model first
                     self.base_model = AutoModelForCausalLM.from_pretrained(
                         base_model_name, **model_kwargs
                     )
 
-                    # Load PEFT adapter
-                    if not os.path.exists(os.path.join(llm_path, "adapter_model.bin")):
-                        raise ValueError("PEFT adapter weights not found")
-
                     self.peft_model = PeftModel.from_pretrained(
                         self.base_model,
-                        llm_path,
+                        llm_dir,
                         is_trainable=False,
                         torch_dtype=model_kwargs["torch_dtype"],
                     )
@@ -267,22 +260,9 @@ class ProductSearchManager:
                 else:
                     logger.info("Loading standard model...")
                     self.base_model = AutoModelForCausalLM.from_pretrained(
-                        llm_path, **model_kwargs
+                        llm_dir, **model_kwargs
                     )
                     self.base_model.eval()
-
-                # Try loading ONNX model if available
-                onnx_path = os.path.join(llm_path, "model.onnx")
-                if os.path.exists(onnx_path):
-                    try:
-                        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-                        self.onnx_session = ort.InferenceSession(
-                            onnx_path, providers=providers
-                        )
-                        logger.info("Successfully loaded ONNX model")
-                    except Exception as e:
-                        logger.warning(f"Failed to load ONNX model: {e}")
-                        self.onnx_session = None
 
                 # Load embedding model
                 embedding_model_name = metadata.get("models", {}).get(
@@ -291,52 +271,33 @@ class ProductSearchManager:
                 self.embedding_model = SentenceTransformer(embedding_model_name)
                 self.embedding_model.to(self.device)
 
-                logger.info(
-                    f"Successfully loaded models: PEFT={is_peft_model}, "
-                    f"ONNX={'available' if self.onnx_session else 'not available'}"
-                )
+                logger.info(f"Successfully loaded models: PEFT={is_peft_model}")
                 return True
 
             except Exception as e:
-                logger.error(f"Error loading models: {e}")
-                self._cleanup_failed_load()
+                logger.error(f"Failed to load model {model_path}. "
+                 f"Existing files: {os.listdir(model_dir) if os.path.exists(model_dir) else 'Missing directory'}")
                 raise
 
-    def _cleanup_failed_load(self):
-        """Enhanced cleanup of failed model loading"""
-        try:
-            models_to_clean = [
-                (self.peft_model, "PEFT model"),
-                (self.base_model, "Base model"),
-                (self.onnx_session, "ONNX session"),
-            ]
-
-            for model, name in models_to_clean:
-                if model is not None:
-                    try:
-                        del model
-                        logger.info(f"Cleaned up {name}")
-                    except Exception as e:
-                        logger.warning(f"Error cleaning up {name}: {e}")
-
-            self.peft_model = None
-            self.base_model = None
-            self.onnx_session = None
-
-            if torch.cuda.is_available():
-                try:
-                    torch.cuda.empty_cache()
-                    logger.info("Cleared CUDA cache")
-                except Exception as e:
-                    logger.warning(f"Error clearing CUDA cache: {e}")
-
-        except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
-
     def generate_response(self, query: str, product_context: str) -> str:
-        """Generate response using the fine-tuned PEFT model"""
+        """Generate response using appropriate model"""
         try:
-            prompt = f"Query: {query}\nContext: {product_context}\nResponse:"
+            if self.peft_model:
+                return self._generate_response_peft(query, product_context)
+            elif self.base_model:
+                return self._generate_response_base(query, product_context)
+            else:
+                raise ValueError("No model available for generation")
+        except Exception as e:
+            logger.error(f"Error generating response: {e}")
+            return "I apologize, but I couldn't process your query."
+        
+        
+        
+    def _generate_response_base(self, query: str, product_context: str) -> str:
+        """Generate response using base model without PEFT"""
+        try:
+            prompt = f"Query: {query}\nContext: {product_context}\nResponse: "
             inputs = self.tokenizer(
                 prompt,
                 return_tensors="pt",
@@ -346,8 +307,8 @@ class ProductSearchManager:
             )
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
-            with torch.no_grad():
-                outputs = self.peft_model.generate(
+            with torch.inference_mode():
+                outputs = self.base_model.generate(
                     **inputs,
                     max_new_tokens=200,
                     num_beams=4,
@@ -361,15 +322,12 @@ class ProductSearchManager:
                 )
 
             response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-            response = response.split("Response:")[-1].strip()
-            return (
-                response if response else "I couldn't generate a meaningful response."
-            )
+            response = response.split("Response: ")[-1].strip()
+            return response if response else "I couldn't generate a meaningful response."
 
         except Exception as e:
-            logger.error(f"Error generating response: {e}")
+            logger.error(f"Error in base model response generation: {e}")
             return "I apologize, but there was an error processing your query."
-
     def _generate_response_peft(self, query: str, product_context: str) -> str:
         """Generate response using PEFT model"""
         try:
@@ -400,9 +358,7 @@ class ProductSearchManager:
             response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
             response = response.split("Response: ")[-1].strip()
             return (
-                response
-                if response
-                else "I apologize, but I couldn't generate a meaningful response."
+                response if response else "I couldn't generate a meaningful response."
             )
 
         except Exception as e:
@@ -428,204 +384,110 @@ class SearchService:
         self.model_cache = ModelCache(AppConfig.MODEL_CACHE_SIZE)
         self.device = AppConfig.DEVICE
         self.product_search = ProductSearchManager()
-        self.preloaded_models = set()
 
-    def preload_models(self):
-        """Preload frequently used models on startup"""
+    def load_model(self, model_path: str) -> Optional[Dict]:
+        """Load model with simplified directory structure"""
         try:
-            # Get list of models from shared directory
-            shared_models = [
-                f
-                for f in os.listdir(AppConfig.SHARED_MODELS_DIR)
-                if os.path.isdir(os.path.join(AppConfig.SHARED_MODELS_DIR, f))
-            ]
+            # Try loading from cache first
+            cached_data = self.model_cache.get(model_path)
+            if cached_data:
+                return cached_data
 
-            for model_path in shared_models[: AppConfig.MODEL_CACHE_SIZE]:
-                try:
-                    self.load_model(model_path)
-                    self.preloaded_models.add(model_path)
-                except Exception as e:
-                    logger.error(f"Error preloading model {model_path}: {e}")
+            # Load from local directory
+            model_dir = os.path.join(AppConfig.BASE_MODEL_DIR, model_path)
+            if os.path.exists(model_dir):
+                return self._load_from_local(model_dir, model_path)
+
+            # Fall back to S3
+            return self._load_from_s3(model_path)
 
         except Exception as e:
-            logger.error(f"Error during model preloading: {e}")
-
-    def load_models(self, model_path: str) -> bool:
-        """Load models with enhanced PEFT support and validation"""
-        try:
-            shared_path = os.path.join(AppConfig.SHARED_MODELS_DIR, model_path)
-            llm_path = os.path.join(shared_path, "llm")
-            logger.info(f"Loading models from {shared_path}")
-
-            # Load metadata
-            metadata_path = os.path.join(shared_path, "metadata.json")
-            if not os.path.exists(metadata_path):
-                raise ValueError(f"Metadata not found in {shared_path}")
-
-            with open(metadata_path, "r") as f:
-                metadata = json.load(f)
-
-            # Initialize tokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained(llm_path)
-            if self.tokenizer.pad_token is None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
-
-            # Load base model
-            base_model_name = metadata.get("models", {}).get("llm", "distilgpt2")
-            model_kwargs = {
-                "device_map": "auto",
-                "torch_dtype": (
-                    torch.float16 if torch.cuda.is_available() else torch.float32
-                ),
-                "low_cpu_mem_usage": True,
-            }
-
-            self.base_model = AutoModelForCausalLM.from_pretrained(
-                base_model_name, **model_kwargs
-            )
-
-            # Load PEFT adapter
-            peft_config = PeftConfig.from_pretrained(llm_path)
-            self.peft_model = PeftModel.from_pretrained(
-                self.base_model,
-                llm_path,
-                config=peft_config,
-                is_trainable=False,
-            )
-            self.peft_model.eval()
-
-            # Load embeddings
-            embeddings_path = os.path.join(shared_path, "embeddings.npy")
-            if not os.path.exists(embeddings_path):
-                raise ValueError(f"Embeddings not found in {shared_path}")
-            self.embeddings = np.load(embeddings_path)
-
-            logger.info("Successfully loaded models")
-            return True
-
-        except Exception as e:
-            logger.error(f"Error loading models: {e}")
-            self._cleanup_failed_load()
+            logger.error(f"Error loading model: {e}")
             raise
 
-    def _are_model_files_complete(self, path: str) -> bool:
-        """Check if all required model files exist"""
-        required_files = [
-            "embeddings.npy",
-            "metadata.json",
-            os.path.join("llm", "tokenizer.json"),
-            os.path.join("llm", "adapter_config.json"),
-            os.path.join("llm", "adapter_model.bin"),
-            # Optional but recommended
-            os.path.join("llm", "model.onnx"),
-        ]
-
-        exists = all(os.path.exists(os.path.join(path, f)) for f in required_files)
-        if not exists:
-            missing = [
-                f for f in required_files if not os.path.exists(os.path.join(path, f))
-            ]
-            logger.warning(f"Missing files in {path}: {missing}")
-        return exists
-
-    def _load_from_shared(self, shared_path: str) -> Optional[Dict]:
-        """Load model from shared storage"""
+    def _load_from_local(self, model_dir: str, model_path: str) -> Optional[Dict]:
+        """Load model from local directory"""
         try:
             # Load embeddings and metadata
-            embeddings = np.load(os.path.join(shared_path, "embeddings.npy"))
-            with open(os.path.join(shared_path, "metadata.json"), "r") as f:
+            embeddings = np.load(os.path.join(model_dir, "embeddings.npy"))
+
+            with open(os.path.join(model_dir, "metadata.json"), "r") as f:
                 metadata = json.load(f)
 
-            # Initialize models if needed
-            if not self.product_search.load_models(shared_path):
+            # Initialize models
+            if not self.product_search.load_models(model_path):
                 raise ValueError("Failed to initialize models")
 
-            return {
+            data = {
                 "embeddings": embeddings,
                 "metadata": metadata,
                 "loaded_at": datetime.now().isoformat(),
-                "source": "shared_volume",
             }
 
+            # Cache the loaded data
+            self.model_cache.put(model_path, data)
+            return data
+
         except Exception as e:
-            logger.error(f"Error loading from shared storage: {e}")
+            logger.error(f"Error loading from local: {e}")
             return None
 
     def _load_from_s3(self, model_path: str) -> Optional[Dict]:
-        """Load model from S3 and save to both shared and cache"""
+        """Load model from S3"""
         try:
-            shared_path = os.path.join(AppConfig.SHARED_MODELS_DIR, model_path)
-            cache_path = os.path.join(AppConfig.MODEL_CACHE_DIR, model_path)
+            model_dir = os.path.join(AppConfig.BASE_MODEL_DIR, model_path)
+            os.makedirs(os.path.join(model_dir, "llm"), exist_ok=True)
 
-            # Create directories
-            for path in [shared_path, cache_path]:
-                os.makedirs(os.path.join(path, "llm"), exist_ok=True)
+            # Download required files
+            files_to_download = [
+                "embeddings.npy",
+                "metadata.json",
+                "products.csv",
+                "llm/adapter_config.json",
+                "llm/adapter_model.bin",
+                "llm/tokenizer.json",
+                "llm/special_tokens_map.json",
+                "llm/tokenizer_config.json",
+            ]
 
-            # Download files to both locations
-            for target_path in [shared_path, cache_path]:
-                self._download_model_files(model_path, target_path)
+            for file in files_to_download:
+                s3_path = f"{model_path}/{file}"
+                local_path = os.path.join(model_dir, file)
 
-            # Try loading from shared path
-            if self._are_model_files_complete(shared_path):
-                return self._load_from_shared(shared_path)
-            return None
+                if not self.s3_manager.download_file(s3_path, local_path):
+                    logger.error(f"Failed to download required file: {file}")
+                    return None
+
+            # Load the downloaded model
+            return self._load_from_local(model_dir, model_path)
 
         except Exception as e:
             logger.error(f"Error loading from S3: {e}")
             return None
 
-    def _download_model_files(self, model_path: str, target_path: str):
-        """Download model files from S3 to target path"""
-        files_to_download = [
-            "embeddings.npy",
-            "metadata.json",
-            "products.csv",
-            "llm/config.json",
-            "llm/pytorch_model.bin",
-            "llm/tokenizer.json",
-            "llm/adapter_config.json",  # PEFT config
-            "llm/adapter_model.bin",  # PEFT weights
-            "llm/model.onnx",  # ONNX model
-        ]
-
-        for file in files_to_download:
-            s3_path = f"{model_path}/{file}"
-            local_path = os.path.join(target_path, file)
-
-            try:
-                if not self.s3_manager.download_file(s3_path, local_path):
-                    logger.warning(f"Failed to download optional file: {file}")
-            except Exception as e:
-                logger.warning(f"Error downloading optional file {file}: {e}")
-
     def search(self, query: str, model_path: str, max_items: int = 10) -> Dict:
         """Perform semantic search with response generation"""
         try:
-            # Load model and embeddings
-            if not self.load_models(model_path):
+            # Load model data
+            model_data = self.load_model(model_path)
+            if not model_data:
                 raise ValueError(f"Failed to load model from {model_path}")
 
             # Generate query embedding
-            query_embedding = (
-                self.embedding_model.encode(
-                    query, convert_to_tensor=True, show_progress_bar=False
-                )
-                .cpu()
-                .numpy()
-            )
+            query_embedding = self.product_search.generate_embedding(query)
 
             # Calculate similarities
-            similarities = np.dot(self.embeddings, query_embedding)
+            similarities = np.dot(model_data["embeddings"], query_embedding)
             top_k_idx = np.argsort(similarities)[-max_items:][::-1]
 
-            # Load products data
+            # Load products
             products_df = self._load_products(model_path)
             if products_df is None:
                 raise ValueError("Failed to load products data")
 
             # Prepare results
             results = []
-            schema = self.metadata["config"]["schema_mapping"]
+            schema = model_data["metadata"]["config"]["schema_mapping"]
 
             for idx in top_k_idx:
                 score = float(similarities[idx])
@@ -651,10 +513,10 @@ class SearchService:
 
                 results.append(result)
 
-            # Generate natural language response
+            # Generate response
             if results:
                 product_context = self._create_product_context(results[:3])
-                response = self.generate_response(query, product_context)
+                response = self.product_search.generate_response(query, product_context)
             else:
                 response = "No matching products found."
 
@@ -665,14 +527,12 @@ class SearchService:
                 "query_info": {
                     "original": query,
                     "model_path": model_path,
-                    "model_type": "peft",
                 },
             }
 
         except Exception as e:
             logger.error(f"Search error: {e}")
             raise
-
     def _load_products(self, model_path: str) -> Optional[pd.DataFrame]:
         """Load products data from shared storage or S3"""
         # Try shared storage first
@@ -699,18 +559,11 @@ class SearchService:
         return context
 
 
+
 # Initialize service
 search_service = SearchService()
 AppConfig.setup_cache_dirs()
 
-
-@app.before_first_request
-def startup():
-    """Initialize service on startup"""
-    try:
-        search_service.preload_models()
-    except Exception as e:
-        logger.error(f"Error during startup: {e}")
 
 
 @app.route("/search", methods=["POST"])
@@ -740,12 +593,10 @@ def health():
         {
             "status": "healthy",
             "device": AppConfig.DEVICE,
-            "cached_models": list(search_service.model_cache.cache.keys()),
-            "preloaded_models": list(search_service.preloaded_models),
+            "model_dir": AppConfig.BASE_MODEL_DIR,
             "model_types": {
-                "peft_available": search_service.peft_model is not None,
-                "onnx_available": search_service.onnx_session is not None,
-                "base_available": search_service.base_model is not None,
+                "peft_available": search_service.product_search.peft_model is not None,
+                "base_available": search_service.product_search.base_model is not None,
             },
         }
     )

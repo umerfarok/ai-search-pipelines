@@ -96,17 +96,16 @@ class AppConfig:
     )
 
     DEFAULT_MODEL: str = "distilgpt2-product"
+    BASE_MODEL_DIR: str = os.getenv("BASE_MODEL_DIR", "/app/models")
     MODEL_CACHE_DIR: str = os.getenv("MODEL_CACHE_DIR", "/app/model_cache")
-    SHARED_MODELS_DIR: str = os.getenv("SHARED_MODELS_DIR", "/app/shared_models")
-    TRANSFORMER_CACHE: str = os.getenv(
-        "TRANSFORMER_CACHE", "/app/model_cache/transformers"
-    )
+    TRANSFORMER_CACHE: str = os.getenv("TRANSFORMER_CACHE", "/app/model_cache/transformers")
     HF_HOME: str = os.getenv("HF_HOME", "/app/model_cache/huggingface")
 
     @classmethod
     def setup_cache_dirs(cls):
         """Setup cache directories for models"""
         for directory in [
+            cls.BASE_MODEL_DIR,
             cls.MODEL_CACHE_DIR,
             cls.TRANSFORMER_CACHE,
             cls.HF_HOME,
@@ -114,14 +113,13 @@ class AppConfig:
         ]:
             os.makedirs(directory, exist_ok=True)
 
-        os.environ.update(
-            {
-                "TORCH_HOME": cls.MODEL_CACHE_DIR,
-                "TRANSFORMERS_CACHE": cls.TRANSFORMER_CACHE,
-                "HF_HOME": cls.HF_HOME,
-                "HF_DATASETS_CACHE": os.path.join(cls.HF_HOME, "datasets"),
-            }
-        )
+        os.environ.update({
+            "TORCH_HOME": cls.MODEL_CACHE_DIR,
+            "TRANSFORMERS_CACHE": cls.TRANSFORMER_CACHE,
+            "HF_HOME": cls.HF_HOME,
+            "HF_DATASETS_CACHE": os.path.join(cls.HF_HOME, "datasets"),
+        })
+
 
 
 class FastProductTrainer:
@@ -239,8 +237,8 @@ class FastProductTrainer:
             logger.error(f"Error preparing training data: {e}")
             raise
 
-    def fast_train(self, dataset: Dataset, config: Dict, output_dir: str):
-        """Fast training implementation with proper resource management"""
+    def fast_train(self, dataset: Dataset, config: Dict, model_path: str):
+        """Fast training implementation with simplified directory structure"""
         if not dataset:
             raise ValueError("No dataset provided for training")
 
@@ -253,18 +251,13 @@ class FastProductTrainer:
             batch_size = training_config.get("batch_size", 4)
             max_tokens = training_config.get("max_tokens", 512)
 
-            # Setup directories
-            
-            model_output_dir = os.path.join(output_dir, "llm")
-            shared_model_dir = os.path.join(AppConfig.SHARED_MODELS_DIR, output_dir)
-            shared_llm_dir = os.path.join(shared_model_dir, "llm")
-
-            for dir_path in [model_output_dir, shared_model_dir, shared_llm_dir, AppConfig.MODEL_CACHE_DIR]:
-                os.makedirs(dir_path, exist_ok=True)
+            # Setup directory
+            model_dir = os.path.join(AppConfig.BASE_MODEL_DIR, model_path, "llm")
+            os.makedirs(model_dir, exist_ok=True)
 
             # Training arguments
             training_args = TrainingArguments(
-                output_dir=model_output_dir,
+                output_dir=model_dir,
                 num_train_epochs=1,
                 per_device_train_batch_size=batch_size,
                 gradient_accumulation_steps=1,
@@ -277,9 +270,7 @@ class FastProductTrainer:
                 remove_unused_columns=False,
                 push_to_hub=False,
                 report_to="none",
-                dataloader_num_workers=(
-                    0 if torch.cuda.is_available() else 4
-                ),  # Prevent CUDA fork issues
+                dataloader_num_workers=(0 if torch.cuda.is_available() else 4),
             )
 
             # Tokenize dataset
@@ -299,13 +290,13 @@ class FastProductTrainer:
             trainer.train()
 
             # Save and validate
-            self._save_and_validate_model(trainer, model_output_dir, shared_llm_dir)
+            self._save_and_validate_model(trainer, model_dir)
 
             return True
 
         except Exception as e:
             logger.error(f"Training error: {e}")
-            self._cleanup_failed_training(model_output_dir, shared_llm_dir)
+            self._cleanup_failed_training(model_dir)
             raise
 
     def _tokenize_dataset(self, dataset: Dataset, max_tokens: int) -> Dataset:
@@ -348,22 +339,19 @@ class FastProductTrainer:
             logger.error(f"Error tokenizing dataset: {e}")
             raise
 
-    def _save_and_validate_model(self, trainer, model_dir: str, shared_dir: str):
-        """Save and validate model with comprehensive checks"""
+    def _save_and_validate_model(self, trainer, model_dir: str):
+        """Save and validate model with simplified structure"""
         try:
             logger.info(f"Saving model to {model_dir}")
-            logger.info(f"Contents of {model_dir}: {os.listdir(model_dir)}")
-            logger.info(f"Contents of {shared_dir}: {os.listdir(shared_dir)}")
             
-            # Create directories
+            # Create directory
             os.makedirs(model_dir, exist_ok=True)
-            os.makedirs(shared_dir, exist_ok=True)
 
             # 1. Save PEFT model state
             logger.info("Saving PEFT model state...")
             self.peft_model.save_pretrained(
                 model_dir,
-                safe_serialization=False,
+                safe_serialization=False,  # Save as .bin
                 save_config=True
             )
 
@@ -374,7 +362,7 @@ class FastProductTrainer:
             # 3. Verify saved files
             required_files = [
                 "adapter_config.json",
-                "adapter_model.bin",  # Now correctly created
+                "adapter_model.bin",
                 "tokenizer.json",
                 "special_tokens_map.json",
                 "tokenizer_config.json"
@@ -394,15 +382,11 @@ class FastProductTrainer:
             except Exception as e:
                 raise ValueError(f"Model validation failed: {e}")
 
-            # 5. Copy to shared directory
-            logger.info(f"Copying to shared directory: {shared_dir}")
-            for file in os.listdir(model_dir):
-                src = os.path.join(model_dir, file)
-                dst = os.path.join(shared_dir, file)
-                if os.path.isfile(src):
-                    shutil.copy2(src, dst)
-                elif os.path.isdir(src):
-                    shutil.copytree(src, dst, dirs_exist_ok=True)
+            # Set proper permissions
+            for root, _, files in os.walk(model_dir):
+                for file in files:
+                    os.chmod(os.path.join(root, file), 0o644)
+                os.chmod(root, 0o755)
 
             return True
 
@@ -661,9 +645,10 @@ class FastModelTrainer:
             logger.error(f"Error updating status: {e}")
 
     def train(self, job: Dict) -> bool:
-        """Main training function with proper error handling and status updates"""
+        """Main training function with simplified paths"""
         config = job["config"]
         config_id = job["config_id"]
+        model_path = config["model_path"]
 
         try:
             # Initialize models
@@ -674,16 +659,7 @@ class FastModelTrainer:
             if df is None or len(df) == 0:
                 raise ValueError("No valid training data found")
 
-            self.update_api_status(
-                config_id,
-                ModelStatus.PROCESSING.value,
-                progress=10,
-                model_info={
-                    "model": config.get("training_config", {}).get(
-                        "llm_model", "distilgpt2"
-                    )
-                },
-            )
+            self.update_api_status(config_id, ModelStatus.PROCESSING.value, progress=10)
 
             # Process data and generate embeddings
             texts = self._process_training_data(df, config)
@@ -694,32 +670,22 @@ class FastModelTrainer:
             dataset = self.product_trainer.prepare_training_data(df, config)
             self.update_api_status(config_id, ModelStatus.PROCESSING.value, progress=50)
 
-            # Setup directories
-            cache_dir = os.path.join(AppConfig.MODEL_CACHE_DIR, config["model_path"])
-            shared_dir = os.path.join(AppConfig.SHARED_MODELS_DIR, config["model_path"])
-            os.makedirs(os.path.join(cache_dir, "llm"), exist_ok=True)
-            os.makedirs(os.path.join(shared_dir, "llm"), exist_ok=True)
-
             # Train model
-            success = self.product_trainer.fast_train(dataset, config, cache_dir)
+            success = self.product_trainer.fast_train(dataset, config, model_path)
             if not success:
                 raise Exception("Model training failed")
 
             # Save model files and upload to S3
-            self._save_model_files(cache_dir, shared_dir, embeddings, df, config)
-            if not self._upload_model_files(shared_dir, config["model_path"]):
+            model_dir = os.path.join(AppConfig.BASE_MODEL_DIR, model_path)
+            self._save_model_files(model_dir, embeddings, df, config)
+            if not self._upload_model_files(model_dir, model_path):
                 raise Exception("Failed to upload model files")
 
             self.update_api_status(
                 config_id,
                 ModelStatus.COMPLETED.value,
                 progress=100,
-                model_info={
-                    "status": "completed",
-                    "model": config.get("training_config", {}).get(
-                        "llm_model", "distilgpt2"
-                    ),
-                },
+                model_info={"status": "completed"}
             )
             return True
 
@@ -731,50 +697,50 @@ class FastModelTrainer:
 
     def _save_model_files(
         self,
-        cache_dir: str,
-        shared_dir: str,
+        model_dir: str,
         embeddings: np.ndarray,
         df: pd.DataFrame,
         config: Dict,
     ):
-        """Save model files with enhanced verification"""
-        for target_dir in [cache_dir, shared_dir]:
-            try:
-                logger.info(f"Saving model files to {target_dir}")
-                os.makedirs(target_dir, exist_ok=True)
-                llm_dir = os.path.join(target_dir, "llm")
-                os.makedirs(llm_dir, exist_ok=True)
+        """Save model files with simplified structure"""
+        try:
+            logger.info(f"Saving model files to {model_dir}")
+            os.makedirs(model_dir, exist_ok=True)
 
-                # Save embeddings and data
-                np.save(os.path.join(target_dir, "embeddings.npy"), embeddings)
-                df.to_csv(os.path.join(target_dir, "products.csv"), index=False)
+            # Save embeddings and data
+            np.save(os.path.join(model_dir, "embeddings.npy"), embeddings)
+            df.to_csv(os.path.join(model_dir, "products.csv"), index=False)
 
-                # Save metadata
-                metadata = {
-                    "timestamp": datetime.now().isoformat(),
-                    "config": config,
-                    "num_samples": len(df),
-                    "embedding_shape": embeddings.shape,
-                    "models": {
-                        "llm": config.get("training_config", {}).get(
-                            "llm_model", "distilgpt2"
-                        ),
-                        "embeddings": "sentence-transformers/all-MiniLM-L6-v2",
-                    },
-                }
+            # Save metadata
+            metadata = {
+                "timestamp": datetime.now().isoformat(),
+                "config": config,
+                "num_samples": len(df),
+                "embedding_shape": embeddings.shape,
+                "models": {
+                    "llm": config.get("training_config", {}).get("llm_model", "distilgpt2"),
+                    "embeddings": "sentence-transformers/all-MiniLM-L6-v2",
+                },
+            }
 
-                with open(os.path.join(target_dir, "metadata.json"), "w") as f:
-                    json.dump(metadata, f, indent=2)
+            with open(os.path.join(model_dir, "metadata.json"), "w") as f:
+                json.dump(metadata, f, indent=2)
 
-                # Verify files
-                required_files = ["embeddings.npy", "products.csv", "metadata.json"]
-                for file in required_files:
-                    if not os.path.exists(os.path.join(target_dir, file)):
-                        raise ValueError(f"Missing required file: {file}")
+            # Verify files
+            required_files = ["embeddings.npy", "products.csv", "metadata.json"]
+            for file in required_files:
+                if not os.path.exists(os.path.join(model_dir, file)):
+                    raise ValueError(f"Missing required file: {file}")
 
-            except Exception as e:
-                logger.error(f"Error saving files to {target_dir}: {e}")
-                raise
+            # Set proper permissions
+            for root, _, files in os.walk(model_dir):
+                for file in files:
+                    os.chmod(os.path.join(root, file), 0o644)
+                os.chmod(root, 0o755)
+
+        except Exception as e:
+            logger.error(f"Error saving files to {model_dir}: {e}")
+            raise
 
     def _upload_model_files(self, local_dir: str, model_path: str) -> bool:
         """Upload model files to S3 with verification"""
