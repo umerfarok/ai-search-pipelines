@@ -74,6 +74,8 @@ services:
       CUDA_DEVICE_MAX_CONNECTIONS: "1"
       NCCL_P2P_DISABLE: "1"
       MODEL_LOAD_DIR: /app/models/models  # Add explicit load directory
+      TRANSFORMERS_CACHE: "/app/model_cache/transformers"
+      XDG_CACHE_HOME: "/app/model_cache"
     ports:
       - "5000:5000"
     command: ["python", "search_service.py"]
@@ -102,7 +104,7 @@ services:
         source: ./cache/model_cache
         target: /app/model_cache
         consistency: cached
-    user: "${UID:-1000}:${GID:-1000}"  # Use host user/group IDs
+    user: "1000:1000"  # Explicit user mapping
     entrypoint: >
       /bin/sh -c "
       python search_service.py
@@ -153,6 +155,7 @@ services:
       TORCH_USE_CUDA_DSA: "1"    # Enable device-side assertions
       PYTORCH_CUDA_ALLOC_CONF: "max_split_size_mb:512"  # Help prevent memory fragmentation
       MODEL_SAVE_DIR: /app/models/models  # Add explicit save directory
+      XDG_CACHE_HOME: "/app/model_cache"
     ports:
       - "5001:5001"
     command: ["python", "training_service.py"]
@@ -180,7 +183,7 @@ services:
         consistency: cached
     tmpfs:
       - /tmp:exec,size=4G  # Add more temp space
-    user: "${UID:-1000}:${GID:-1000}"  # Use host user/group IDs
+    user: "1000:1000"  # Explicit user mapping
     entrypoint: >
       /bin/sh -c "
       python training_service.py

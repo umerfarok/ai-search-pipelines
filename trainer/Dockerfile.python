@@ -1,31 +1,41 @@
 ARG BASE_IMAGE=ml-base:latest
 FROM ${BASE_IMAGE} as base
 
-# Create non-root user and setup directories
-RUN useradd -ms /bin/bash appuser && \
-    chown -R appuser:appuser /app
+# Create non-root user and setup directories with correct permissions
+RUN useradd -u 1000 -m -s /bin/bash appuser && \
+    mkdir -p /app/models && \
+    mkdir -p /app/model_cache/transformers && \
+    mkdir -p /app/model_cache/huggingface && \
+    mkdir -p /app/shared_models && \
+    mkdir -p /app/s3_cache && \
+    chown -R appuser:appuser /app && \
+    chmod -R 755 /app
+
 RUN pip3 uninstall numpy -y
 
 # Install service-specific dependencies
 COPY requirements.service.txt .
-RUN pip3 install --no-cache-dir -r requirements.service.txt && \
-    rm requirements.service.txt
+RUN pip3 install --no-cache-dir -r requirements.service.txt
 
-
-
+# Switch to appuser
 USER appuser
 
-FROM base as prod
-RUN mkdir -p /app/model_cache \
-    && mkdir -p /app/model_cache/transformers \
-    && mkdir -p /app/model_cache/huggingface \ 
-    && mkdir -p /app/shared_models \
-    mkdir -p models \
-    chmod 777 models \
-    && chown -R 1000:1000 /app \
-    && chmod -R 755 /app
+# Create cache directories with proper permissions
+RUN mkdir -p ~/.cache/huggingface && \
+    mkdir -p ~/.cache/torch && \
+    mkdir -p ~/.cache/transformers
 
+# Set cache environment variables
+ENV TRANSFORMERS_CACHE=/app/model_cache/transformers \
+    HF_HOME=/app/model_cache/huggingface \
+    TORCH_HOME=/app/model_cache \
+    XDG_CACHE_HOME=/app/model_cache
+
+WORKDIR /app
+
+FROM base as prod
 COPY --chown=appuser:appuser . .
+
 USER appuser
 CMD ["python3", "app.py"]
 
