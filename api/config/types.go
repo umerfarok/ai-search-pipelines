@@ -121,7 +121,7 @@ type LLMModelInfo struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 }
-
+ 
 var AvailableLLMModels = map[string]LLMModelInfo{
 	"deepseek-coder": {
 		Name:        "DeepSeek Coder 1.3B",

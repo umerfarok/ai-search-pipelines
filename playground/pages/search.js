@@ -40,7 +40,7 @@ const useModelSearch = () => {
             const data = await response.json();
             setModels(data.configs);
         } catch (err) { 
-            setError(err.message);
+            setError(err.message); 
         } finally {
             setLoading(false);
         }
@@ -261,33 +261,56 @@ const FilterPanel = ({ model, activeFilters, onFilterChange }) => {
     );
 };
 
-const SearchResults = ({ results, currentPage, totalPages, onPageChange }) => (
-    <div className="space-y-4">
+const SearchResults = ({ results, naturalResponse, queryInfo, currentPage, totalPages, onPageChange }) => (
+    <div className="space-y-6">
+        {/* Natural Language Response */}
+        {naturalResponse && (
+            <div className="bg-blue-50 border border-blue-100 rounded-lg p-4 mb-4">
+                <h3 className="text-sm font-semibold text-blue-800 mb-2">AI Response:</h3>
+                <p className="text-gray-700">{naturalResponse}</p>
+            </div>
+        )}
+
+        {/* Query Info */}
+        {queryInfo && (
+            <div className="text-sm text-gray-500 mb-4">
+                <span>Original Query: {queryInfo.original}</span>
+                <span className="mx-2">•</span>
+                <span>Model: {queryInfo.model_path}</span>
+            </div>
+        )}
+
+        {/* Results */}
         {results.map((result, index) => (
-            <div key={index} className="border rounded-lg p-4 hover:shadow-md transition-shadow">
+            <div key={index} className="border rounded-lg p-4 hover:shadow-md transition-shadow bg-white">
                 <div className="flex justify-between items-start">
                     <div>
                         <h3 className="font-semibold text-lg">{result.name}</h3>
                         <p className="text-gray-600 mt-1">{result.description}</p>
                     </div>
-                    <span className="bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded-full">
-                        {(result.score * 100).toFixed(1)}% match
-                    </span>
+                    <div className="flex flex-col items-end">
+                        <span className="bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded-full">
+                            {(result.score * 100).toFixed(1)}% match
+                        </span>
+                        <span className="text-xs text-gray-500 mt-1">ID: {result.id}</span>
+                    </div>
                 </div>
 
-                <div className="mt-3 pt-3 border-t grid grid-cols-2 gap-4">
-                    <div>
-                        <span className="text-sm text-gray-500">Category:</span>
-                        <span className="ml-2 text-sm">{result.category}</span>
-                    </div>
-
-                    {/* Metadata fields */}
-                    {Object.entries(result.metadata || {}).map(([key, value]) => (
-                        <div key={key}>
-                            <span className="text-sm text-gray-500">{key}:</span>
-                            <span className="ml-2 text-sm">{value}</span>
+                <div className="mt-3 pt-3 border-t">
+                    <div className="grid grid-cols-2 gap-4">
+                        <div>
+                            <span className="text-sm text-gray-500">Category:</span>
+                            <span className="ml-2 text-sm font-medium">{result.category}</span>
                         </div>
-                    ))}
+
+                        {/* Metadata fields */}
+                        {Object.entries(result.metadata || {}).map(([key, value]) => (
+                            <div key={key}>
+                                <span className="text-sm text-gray-500">{key}:</span>
+                                <span className="ml-2 text-sm font-medium">{value}</span>
+                            </div>
+                        ))}
+                    </div>
                 </div>
             </div>
         ))}
@@ -336,9 +359,43 @@ export default function ModelSearchComponent() {
 
     const [searchQuery, setSearchQuery] = useState('');
 
+    const [searchResponse, setSearchResponse] = useState({
+        results: [],
+        naturalResponse: '',
+        queryInfo: null,
+        total: 0
+    });
+
     const handleSearch = async (e) => {
         e.preventDefault();
-        await performSearch(searchQuery, activeFilters, 1); // Reset to page 1 on new search
+        try {
+            const response = await fetch(`${API_BASE_URL}/search`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    query: searchQuery,
+                    model_path: selectedModel.model_path,
+                    max_items: 20,
+                    filters: activeFilters,
+                    page: 1
+                })
+            });
+
+            if (!response.ok) throw new Error('Search failed');
+            const data = await response.json();
+            setSearchResponse({
+                results: data.results,
+                naturalResponse: data.natural_response,
+                queryInfo: data.query_info,
+                total: data.total
+            });
+            setCurrentPage(1);
+            setTotalPages(Math.ceil(data.total / 20));
+        } catch (err) {
+            setError(err.message);
+        } finally {
+            setSearching(false);
+        }
     };
 
     if (loading) {
@@ -400,9 +457,11 @@ export default function ModelSearchComponent() {
                         </form>
 
                         {/* Results */}
-                        {searchResults.length > 0 ? (
+                        {searchResponse.results.length > 0 ? (
                             <SearchResults
-                                results={searchResults}
+                                results={searchResponse.results}
+                                naturalResponse={searchResponse.naturalResponse}
+                                queryInfo={searchResponse.queryInfo}
                                 currentPage={currentPage}
                                 totalPages={totalPages}
                                 onPageChange={handlePageChange}
