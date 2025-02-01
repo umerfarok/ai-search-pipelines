@@ -84,13 +84,12 @@ func setupRouter(configService *handlers.ConfigService, searchService *handlers.
 	r.POST("/config", configService.CreateConfig)
 	r.GET("/config/:id", configService.GetConfig)
 	r.GET("/config", configService.ListConfigs)
-	r.GET("/config/status/:id", configService.GetTrainingStatus)
+	r.GET("/config/status/:id", configService.GetTrainingStatus) 
 	r.PUT("/config/status/:id", configService.UpdateConfigStatus)
 
 	r.GET("/config/llm-models", configService.GetAvailableLLMModels)
 	r.GET("/queue", configService.GetQueuedJobs)
 
-	// Add search endpoint
 	if searchService != nil {
 		r.POST("/search", searchService.Search)
 	}
@@ -121,10 +120,10 @@ func main() {
 		log.Fatalf("Failed to initialize config service: %v", err)
 	}
 
-	// Initialize search service with the database connection
+	// Initialize search service
 	searchService := handlers.NewSearchService(db)
 
-	// Setup router with both services
+	// Setup router
 	router := setupRouter(configService, searchService)
 
 	// Get port from environment
@@ -157,7 +156,12 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// Cleanup services
+	if searchService != nil {
+		searchService.Close()
+	}
 
+	// Shutdown server
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Fatal("Server forced to shutdown:", err)
 	}
