@@ -15,7 +15,7 @@ const BASIC_RESPONSES = {
     farewell: [
         "Thank you for chatting! Let me know if you need anything else.",
         "Have a great day! Feel free to come back if you need more help.",
-        "Goodbye! Don't hesitate to ask if you have more questions."
+        "Goodbye! Don't hesitate to ask if you have more questions." 
     ],
     unknown: [
         "I'm not sure about that. Would you like to search our products?",
@@ -46,39 +46,92 @@ const BasicPatterns = [
     }
 ];
 
-const ChatMessage = ({ message, isBot }) => (
-    <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        className={`flex ${isBot ? 'justify-start' : 'justify-end'} mb-4`}
-    >
-        <div
-            className={`max-w-[80%] rounded-lg p-3 ${
-                isBot
-                    ? 'bg-gray-100 text-gray-800'
-                    : 'bg-blue-500 text-white'
-            }`}
+const ChatMessage = ({ message, isBot }) => {
+    // Helper function to format metadata
+    const formatMetadata = (metadata) => {
+        if (!metadata) return '';
+        return Object.entries(metadata)
+            .map(([key, value]) => `- ${key}: ${value}`)
+            .join('\n');
+    };
+
+    // Format product results into markdown
+    const formatProductResult = (result) => {
+        return `**${result.name}**
+Description: ${result.description}
+Category: ${result.category}
+Match Score: ${(result.score * 100).toFixed(1)}%
+${formatMetadata(result.metadata)}`;
+    };
+
+    // Convert search results to markdown
+    const formatSearchResults = (content) => {
+        if (typeof content === 'string') return content;
+        
+        let markdown = '';
+        if (content.naturalResponse) {
+            markdown += `${content.naturalResponse}\n\n`;
+        }
+
+        if (content.results && content.results.length > 0) {
+            markdown += '### Found Products:\n\n';
+            content.results.forEach((result, index) => {
+                markdown += `${formatProductResult(result)}\n\n`;
+            });
+        }
+
+        if (content.queryInfo) {
+            markdown += `---\n*Search Query: "${content.queryInfo.original}"*`;
+        }
+
+        return markdown;
+    };
+
+    return (
+        <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className={`flex ${isBot ? 'justify-start' : 'justify-end'} mb-4`}
         >
-            {message.type === 'markdown' ? (
-                <ReactMarkdown 
-                    className="prose prose-sm max-w-none"
-                    components={{
-                        a: ({ node, ...props }) => (
-                            <a {...props} className="text-blue-300 hover:text-blue-200" />
-                        ),
-                        code: ({ node, ...props }) => (
-                            <code {...props} className="bg-gray-700 rounded px-1" />
-                        ),
-                    }}
-                >
-                    {message.content}
-                </ReactMarkdown>
-            ) : (
-                <p className="whitespace-pre-wrap">{message.content}</p>
-            )}
-        </div>
-    </motion.div>
-);
+            <div
+                className={`max-w-[80%] rounded-lg p-3 ${
+                    isBot
+                        ? 'bg-gray-100 text-gray-800'
+                        : 'bg-blue-500 text-white'
+                }`}
+            >
+                {message.type === 'markdown' ? (
+                    <ReactMarkdown
+                        className="prose prose-sm max-w-none dark:prose-invert"
+                        components={{
+                            a: ({ node, ...props }) => (
+                                <a {...props} className="text-blue-300 hover:text-blue-200" />
+                            ),
+                            code: ({ node, ...props }) => (
+                                <code {...props} className="bg-gray-700 rounded px-1" />
+                            ),
+                            p: ({ node, ...props }) => (
+                                <p {...props} className="mb-2" />
+                            ),
+                            h3: ({ node, ...props }) => (
+                                <h3 {...props} className="text-lg font-bold mb-2" />
+                            ),
+                            hr: ({ node, ...props }) => (
+                                <hr {...props} className="my-2 border-gray-300" />
+                            ),
+                        }}
+                    >
+                        {typeof message.content === 'object' 
+                            ? formatSearchResults(message.content) 
+                            : message.content}
+                    </ReactMarkdown>
+                ) : (
+                    <p className="whitespace-pre-wrap">{message.content}</p>
+                )}
+            </div>
+        </motion.div>
+    );
+};
 
 const TypingIndicator = () => (
     <div className="flex items-center space-x-2 text-gray-400">
@@ -184,44 +237,21 @@ const ChatBot = ({ configId = 'latest' }) => {
                 })
             });
 
+            if (!response.ok) throw new Error('Search failed');
             const data = await response.json();
-            if (response.ok) {
-                // Format bot response with markdown
-                let botResponse = "Here's what I found:\n\n";
-                
-                if (data.natural_response) {
-                    botResponse = data.natural_response + "\n\n";
-                }
-
-                if (data.results && data.results.length > 0) {
-                    data.results.forEach((result, index) => {
-                        botResponse += `**${result.name}**\n`;
-                        botResponse += `- ${result.description}\n`;
-                        botResponse += `- Category: ${result.category}\n`;
-                        if (result.metadata) {
-                            Object.entries(result.metadata).forEach(([key, value]) => {
-                                botResponse += `- ${key}: ${value}\n`;
-                            });
-                        }
-                        botResponse += `- Match Score: ${(result.score * 100).toFixed(1)}%\n\n`;
-                    });
-                } else {
-                    botResponse += "I couldn't find any matching products. Try rephrasing your search.";
-                }
-
-                setMessages(prev => [...prev, { 
-                    content: botResponse, 
-                    type: 'markdown',
-                    isBot: true 
-                }]);
-            } else {
-                throw new Error(data.error || 'Search failed');
-            }
+            
+            // Pass the entire response object to the message content
+            setMessages(prev => [...prev, {
+                content: data,
+                type: 'markdown',
+                isBot: true
+            }]);
+            
         } catch (error) {
-            setMessages(prev => [...prev, { 
+            setMessages(prev => [...prev, {
                 content: getRandomResponse('unknown'),
                 type: 'text',
-                isBot: true 
+                isBot: true
             }]);
         } finally {
             setIsTyping(false);
