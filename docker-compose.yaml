@@ -91,19 +91,15 @@ services:
       - app-network
     volumes:
       - type: bind
-        source: ./models
-        target: /app/models
-        consistency: cached
-      - type: bind
         source: ./cache/temp
         target: /tmp/search
       - type: bind
         source: ./cache/s3_cache
         target: /app/s3_cache
       - type: bind
-        source: ./cache/model_cache
-        target: /app/model_cache
-        consistency: cached
+        source: ./models
+        target: /app/models
+        read_only: false
     user: "${UID:-1000}:${GID:-1000}"  # Explicit user mapping
     entrypoint: >
       /bin/sh -c "
@@ -171,16 +167,15 @@ services:
       - app-network
     volumes:
       - type: bind
+        source: ./cache/temp
+        target: /tmp/search
+      - type: bind
+        source: ./cache/s3_cache
+        target: /app/s3_cache
+      - type: bind
         source: ./models
         target: /app/models
-        consistency: cached
-      - type: bind
-        source: ./cache/temp
-        target: /tmp/training
-      - type: bind
-        source: ./cache/model_cache
-        target: /app/model_cache
-        consistency: cached
+        read_only: false
     tmpfs:
       - /tmp:exec,size=4G  # Add more temp space
     user: "${UID:-1000}:${GID:-1000}"  # Explicit user mapping
@@ -305,25 +300,3 @@ volumes:
     driver: local
   model_cache:
     driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ./cache/models
-      uid: "${UID:-1000}"
-      gid: "${GID:-1000}"
-  s3_cache:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ./cache/s3_cache
-      uid: "${UID:-1000}"
-      gid: "${GID:-1000}"
-  transformers_cache:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ./cache/transformers
-      uid: "${UID:-1000}"
-      gid: "${GID:-1000}"

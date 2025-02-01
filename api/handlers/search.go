@@ -67,53 +67,94 @@ func (s *SearchService) checkHealth() {
 	defer resp.Body.Close()
 }
 
+type SearchResult struct {
+	ID          string            `json:"id"`
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	Category    string            `json:"category"`
+	Score       float64           `json:"score"`
+	Metadata    map[string]string `json:"metadata"`
+}
+
+type SearchResponse struct {
+	Results         []SearchResult `json:"results"`
+	Total           int            `json:"total"`
+	NaturalResponse string         `json:"natural_response"`
+	QueryInfo       QueryInfo      `json:"query_info"`
+}
+
+type QueryInfo struct {
+	Original  string `json:"original"`
+	ModelPath string `json:"model_path"`
+}
+
 func (s *SearchService) Search(c *gin.Context) {
-	var req config.SearchRequest
+	var req struct {
+		Query     string                 `json:"query"`
+		ModelPath string                 `json:"model_path"`
+		MaxItems  int                    `json:"max_items"`
+		Filters   map[string]interface{} `json:"filters,omitempty"`
+	}
+
 	if err := c.BindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Set default max items if not specified
+	// Set default max items
 	if req.MaxItems == 0 {
 		req.MaxItems = 10
 	}
 
-	// Get the appropriate model configuration
-	modelConfig, err := s.getModelConfig(req.ConfigID)
+	// If Query or ModelPath is empty, get the latest completed model
+	if req.Query == "" || req.ModelPath == "" {
+		modelConfig, err := s.getModelConfig("latest")
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to get latest model config: %v", err)})
+			return
+		}
+		req.ModelPath = modelConfig.ModelPath
+	}
+
+	// Forward request to search service
+	jsonBody, err := json.Marshal(req)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("failed to get model config: %v", err)})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to marshal request: %v", err)})
 		return
 	}
 
-	// Ensure model is in a completed state
-	if modelConfig.Status != string(config.ModelStatusCompleted) {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": fmt.Sprintf("model is not ready for search (status: %s)", modelConfig.Status),
-		})
-		return
-	}
-
-	// Forward search request to search service
-	searchReq := struct {
-		Query     string                 `json:"query"`
-		ModelPath string                 `json:"model_path"`
-		MaxItems  int                    `json:"max_items"` 
-		Filters   map[string]interface{} `json:"filters,omitempty"`
-	}{
-		Query:     req.Query,
-		ModelPath: modelConfig.ModelPath,
-		MaxItems:  req.MaxItems,
-		Filters:   req.Filters,
-	}
-
-	response, err := s.performSearch(searchReq, modelConfig)
+	// Call Python search service
+	resp, err := http.Post(
+		fmt.Sprintf("%s/search", s.searchHost),
+		"application/json",
+		bytes.NewBuffer(jsonBody),
+	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("search failed: %v", err)})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("search service error: %v", err)})
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errorResp struct {
+			Error string `json:"error"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&errorResp); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "unknown search service error"})
+			return
+		}
+		c.JSON(resp.StatusCode, gin.H{"error": errorResp.Error})
 		return
 	}
 
-	c.JSON(http.StatusOK, response)
+	// Decode response from Python service
+	var searchResp SearchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&searchResp); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to decode response: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, searchResp)
 }
 
 func (s *SearchService) getModelConfig(configID string) (*config.ModelConfig, error) {
@@ -189,18 +230,6 @@ func (s *SearchService) performSearch(req interface{}, modelConfig *config.Model
 	searchResp.ConfigInfo = *modelConfig
 
 	return &searchResp, nil
-}
-
-func (s *SearchService) enhanceSearchResults(results []config.SearchResult, modelConfig *config.ModelConfig) []config.SearchResult {
-	// Add any additional metadata or post-processing of search results
-	for i := range results {
-		// Example: Add schema information or other relevant metadata
-		results[i].Metadata = map[string]interface{}{
-			"schema_version": modelConfig.Version,
-			"model_name":     modelConfig.Name,
-		}
-	}
-	return results
 }
 
 func (s *SearchService) Close() {

@@ -485,9 +485,9 @@ func (s *ConfigService) GetQueuedJobs(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to get queue length: %v", err)})
 		return
 	}
-
+ 
 	if queueLen == 0 {
-		c.JSON(http.StatusOK, gin.H{
+		c.JSON(http.StatusOK, gin.H{ 
 			"count": 0,
 			"jobs":  []interface{}{},
 		})
