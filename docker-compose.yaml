@@ -305,25 +305,3 @@ volumes:
     driver: local
   model_cache:
     driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ./cache/models
-      uid: "${UID:-1000}"
-      gid: "${GID:-1000}"
-  s3_cache:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ./cache/s3_cache
-      uid: "${UID:-1000}"
-      gid: "${GID:-1000}"
-  transformers_cache:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ./cache/transformers
-      uid: "${UID:-1000}"
-      gid: "${GID:-1000}"
