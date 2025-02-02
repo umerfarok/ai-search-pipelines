@@ -75,7 +75,7 @@ class QueryUnderstanding:
         self.intent_classifier = pipeline(
             "zero-shot-classification", model="facebook/bart-large-mnli"
         )
-        self.nlp = nlp  # Use the initialized nlp
+        self.nlp = nlp  
         self.domain_keywords = {
             "cooking": [
                 "cook",
@@ -844,16 +844,29 @@ class TrainingWorker:
     def process_job(self, job: Dict):
         """Process a single training job"""
         try:
-            logger.info(f"Processing job for config: {job['_id']['$oid']}")
-            config_id = job["_id"]["$oid"]
+            config = job.get('config', {})
+            config_id = config.get('_id')
+            
+            if not config_id:
+                raise ValueError("Invalid job structure - missing config ID")
 
+            logger.info(f"Processing job for config: {config_id}")
             self._update_status(config_id, ModelStatus.PROCESSING, progress=0)
 
-            # Validate schema mapping
-            if not self._validate_schema_mapping(job):
-                raise ValueError("Invalid schema mapping configuration")
+            # # Validate schema mapping
+            # if not self._validate_schema_mapping(config):
+            #     raise ValueError("Invalid schema mapping configuration")
 
-            success = self.trainer.train(job)
+            # Convert schema mapping keys to match expected format
+            config['schema_mapping'] = {
+                'idcolumn': config['schema_mapping'].get('id_column'),
+                'namecolumn': config['schema_mapping'].get('name_column'),
+                'descriptioncolumn': config['schema_mapping'].get('description_column'),
+                'categorycolumn': config['schema_mapping'].get('category_column'),
+                'customcolumns': config['schema_mapping'].get('custom_columns', [])
+            }
+
+            success = self.trainer.train(config)
 
             if success:
                 self._update_status(config_id, ModelStatus.COMPLETED, progress=100)
@@ -864,7 +877,10 @@ class TrainingWorker:
 
         except Exception as e:
             logger.error(f"Error processing job: {e}")
-            self._update_status(job["_id"]["$oid"], ModelStatus.FAILED, error=str(e))
+            if 'config' in job and '_id' in job['config']:
+                self._update_status(job['config']['_id'], ModelStatus.FAILED, error=str(e))
+            else:
+                logger.error("Could not update status: invalid job structure")
 
     def _validate_schema_mapping(self, config: Dict) -> bool:
         """Validate schema mapping configuration"""

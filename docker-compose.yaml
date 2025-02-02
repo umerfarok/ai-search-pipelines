@@ -98,6 +98,18 @@ services:
       - type: bind
         source: ./models
         target: /app/models
+      - type: bind
+        source: ./cache/model_cache/transformers
+        target: /app/model_cache/transformers
+      - type: bind
+        source: ./cache/model_cache/huggingface
+        target: /app/model_cache/huggingface
+      - type: bind
+        source: ./cache/model_cache/torch
+        target: /app/model_cache
+      - type: bind
+        source: ./cache/model_cache/general
+        target: /app/model_cache/general
         read_only: false
     tmpfs:
       - /tmp:exec,size=4G  # Add more temp space
