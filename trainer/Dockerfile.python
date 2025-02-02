@@ -21,7 +21,7 @@ RUN pip3 uninstall numpy -y
 # Install dependencies
 COPY --chown=appuser:appuser requirements.service.txt .
 RUN pip3 install --no-cache-dir -r requirements.service.txt && \
-    python -m spacy download en_core_web_sm
+    python -m spacy validate
 
 # Switch to appuser and set up cache directories
 USER appuser

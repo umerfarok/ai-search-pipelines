@@ -47,10 +47,6 @@ class ModelInitializer:
         # Always initialize default model first
         self._load_embedding_model(AppConfig.DEFAULT_MODEL)
         
-        # Initialize other configured models
-        for model_name in tqdm(AppConfig.AVAILABLE_MODELS.keys(), desc="Loading embedding models"):
-            if model_name != AppConfig.DEFAULT_MODEL:
-                self._load_embedding_model(model_name)
 
     def _load_embedding_model(self, model_name: str):
         """Load a specific embedding model"""
