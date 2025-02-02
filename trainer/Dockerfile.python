@@ -18,9 +18,10 @@ RUN mkdir -p /app/{models,model_cache,s3_cache} && \
 
 RUN pip3 uninstall numpy -y
 
-    # Install dependencies
+# Install dependencies
 COPY --chown=appuser:appuser requirements.service.txt .
-RUN pip3 install --no-cache-dir -r requirements.service.txt
+RUN pip3 install --no-cache-dir -r requirements.service.txt && \
+    python -m spacy download en_core_web_sm
 
 # Switch to appuser and set up cache directories
 USER appuser

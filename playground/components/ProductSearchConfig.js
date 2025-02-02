@@ -21,15 +21,20 @@ const ModelStatus = {
 
 // Updated model configurations
 const AVAILABLE_LLM_MODELS = {
-    "distilgpt2": {
-        name: "DistilGPT-2",
-        description: "Lightweight model optimized for product search",
-        tags: ["fast", "efficient"]
-    },
-    "all-minilm-l6": {
-        name: "all-MiniLM-L6-v2",
+    "BAAI/bge-small-en-v1.5": {
+        name: "BGE Small",
         description: "Efficient embedding model for semantic search",
         tags: ["semantic", "fast"]
+    },
+    "BAAI/bge-base-en-v1.5": {
+        name: "BGE Base", 
+        description: "Balanced performance embedding model",
+        tags: ["semantic", "balanced"]
+    },
+    "BAAI/bge-large-en-v1.5": {
+        name: "BGE Large",
+        description: "High performance embedding model",
+        tags: ["semantic", "accurate"]
     }
 };
 
