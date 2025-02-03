@@ -1,4 +1,3 @@
-
 from dataclasses import dataclass
 import os
 @dataclass
@@ -9,9 +8,12 @@ class AppConfig:
     REDIS_PASSWORD: str = os.getenv("REDIS_PASSWORD", "")
     TRAINING_QUEUE: str = "training_queue"
     MODEL_STATUS_PREFIX: str = "model_status:"
+    REQUIRED_MODELS = ["BAAI/bge-large-en-v1.5"]
+    HF_TOKEN= os.getenv("HF_TOKEN", "asjfnasdjdnflasnfaskdnf")
     
     # Service Configuration
-    SERVICE_PORT: int = int(os.getenv("SERVICE_PORT", 5000))
+    SERVICE_PORT: int = int(os.getenv("SERVICE_PORT", 5001))
+    TRAIN_SERVICE_PORT: int = int(os.getenv("TRAIN_SERVICE_PORT", 5000))
     
     # AWS Configuration
     AWS_ACCESS_KEY: str = os.getenv("AWS_ACCESS_KEY")
@@ -26,23 +28,56 @@ class AppConfig:
     RETRY_DELAY: int = 1
     
     # Model Configuration
-    AVAILABLE_MODELS = {
-        "BAAI/bge-small-en-v1.5": {
+    DEFAULT_MODEL = "sentence-transformers/all-minilm-l6-v2"  # Update default model
+    MODEL_MAPPINGS = {
+        "all-minilm-l6": {
+            "name": "All-MiniLM-L6",
+            "path": "sentence-transformers/all-MiniLM-L6-v2",
+            "description": "Fast and efficient general-purpose embedding model",
+            "tags": ["semantic", "fast", "default"],
+            "is_default": True
+        },
+        "bge-small": {
             "name": "BGE Small",
-            "description": "Efficient embedding model for semantic search",
+            "path": "BAAI/bge-small-en-v1.5",
+            "description": "Small but effective embedding model",
             "tags": ["semantic", "fast"],
+            "is_default": False
         },
-        "BAAI/bge-base-en-v1.5": {
+        "bge-base": {
             "name": "BGE Base",
-            "description": "Balanced performance embedding model",
+            "path": "BAAI/bge-base-en-v1.5",
+            "description": "Medium-sized embedding model",
             "tags": ["semantic", "balanced"],
+            "is_default": False
         },
-        "BAAI/bge-large-en-v1.5": {
+        "bge-large": {
             "name": "BGE Large",
-            "description": "High performance embedding model",
+            "path": "BAAI/bge-large-en-v1.5",
+            "description": "Large, high-performance embedding model",
             "tags": ["semantic", "accurate"],
-        },
+            "is_default": False
+        }
     }
+
+    # Default model settings
+    DEFAULT_MODEL = "all-minilm-l6"
+    REQUIRED_MODELS = ["all-minilm-l6", "bge-large"]  # Models to preload
+    
+    @classmethod
+    def get_model_path(cls, model_key: str) -> str:
+        """Get the full model path from a model key"""
+        if model_key in cls.MODEL_MAPPINGS:
+            return cls.MODEL_MAPPINGS[model_key]["path"]
+        return model_key  # Return as-is if not found
+    
+    @classmethod
+    def get_model_key(cls, model_path: str) -> str:
+        """Get the model key from a full path"""
+        for key, info in cls.MODEL_MAPPINGS.items():
+            if info["path"] == model_path:
+                return key
+        return model_path 
     
     # Cache Configuration
     MODEL_CACHE_SIZE: int = int(os.getenv("MODEL_CACHE_SIZE", "3"))
@@ -53,7 +88,7 @@ class AppConfig:
     ONNX_CACHE_DIR: str = os.getenv("ONNX_CACHE_DIR", "/app/model_cache/onnx")
     
     # Search Configuration
-    DEFAULT_MODEL: str = "BAAI/bge-large-en-v1.5"
+    DEFAULT_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"  # Update default model
     MIN_SCORE: float = 0.3
     HYBRID_SEARCH_ALPHA: float = 0.7
     RERANKER_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
