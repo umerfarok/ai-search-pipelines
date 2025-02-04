@@ -20,9 +20,7 @@ from collections import OrderedDict
 from rank_bm25 import BM25Okapi
 from nltk.tokenize import word_tokenize
 import nltk
-from transformers import (
-    pipeline
-)
+from transformers import pipeline
 import json
 import spacy
 from config import AppConfig
@@ -101,17 +99,16 @@ class DynamicQueryUnderstanding:
 
         try:
             expanded = self.query_expansion_model(
-                prompt, max_length=50, num_return_sequences=3
+                prompt,
+                max_length=50,
+                num_return_sequences=1,
+                num_beams=3,
+                early_stopping=True,
             )
-
-            terms = []
-            for result in expanded:
-                terms.extend(result["generated_text"].split())
-            return list(set(terms))
-
+            return list(set(expanded[0]["generated_text"].split()))
         except Exception as e:
-            logger.error(f"Query expansion failed: {e}")
-            return []
+            logger.error(f"Query expansion failed, using fallback: {e}")
+            return [query]
 
     def _extract_semantic_features(self, text: str) -> Dict[str, Any]:
         """Extract semantic features from text"""
@@ -782,6 +779,78 @@ class SearchService:
         self.hybrid_search = HybridSearchEngine()
         self._initialize_required_models()
 
+    def _process_candidate(
+        self, product: pd.Series, schema: Dict, score: float, idx: int
+    ) -> Dict:
+        """Process a single candidate with detailed logging"""
+        try:
+            # Log initial processing attempt
+            logger.info(f"Processing candidate at index {idx}")
+            logger.info(f"Schema mapping: {json.dumps(schema, indent=2)}")
+            logger.info(f"Product columns: {list(product.index)}")
+
+            text_parts = []
+
+            # Log ID column detection
+            id_column = schema.get("id_column", "id")
+            logger.info(f"Looking for ID in column: {id_column}")
+            logger.info(f"Available columns: {list(product.index)}")
+
+            # Get ID with fallback to index
+            if id_column in product:
+                candidate_id = str(product[id_column])
+                logger.info(f"Found ID in column {id_column}: {candidate_id}")
+            else:
+                candidate_id = str(product.name)
+                logger.warning(
+                    f"ID column '{id_column}' not found, using index: {candidate_id}"
+                )
+
+            # Log field mappings
+            field_mappings = {
+                "name": schema.get("name_column", "name"),
+                "description": schema.get("description_column", "description"),
+                "category": schema.get("category_column", "category"),
+            }
+            logger.info(f"Field mappings: {json.dumps(field_mappings, indent=2)}")
+
+            candidate = {"id": candidate_id, "score": score, "metadata": {}}
+
+            # Process each field with detailed logging
+            for field, column in field_mappings.items():
+                logger.info(f"Processing field '{field}' using column '{column}'")
+                if column in product:
+                    value = str(product[column])
+                    logger.info(
+                        f"Found value for {field}: {value[:100]}..."
+                    )  # Log first 100 chars
+                else:
+                    value = ""
+                    logger.warning(f"Column '{column}' not found for field '{field}'")
+
+                candidate[field] = value
+                if value:
+                    text_parts.append(value)
+
+            candidate["text"] = " ".join(text_parts)
+
+            # Log custom fields processing
+            custom_fields = schema.get("custom_fields", [])
+            logger.info(f"Processing custom fields: {custom_fields}")
+            for field in custom_fields:
+                if field in product:
+                    value = str(product[field])
+                    candidate["metadata"][field] = value
+                    logger.info(f"Added custom field {field}: {value[:100]}...")
+                else:
+                    logger.warning(f"Custom field '{field}' not found in product")
+
+            return candidate
+        except Exception as e:
+            logger.error(f"Error processing candidate at index {idx}: {str(e)}")
+            logger.error(f"Product data: {product.to_dict()}")
+            return None
+
     def search(
         self,
         query: str,
@@ -790,39 +859,51 @@ class SearchService:
         max_items: int = 10,
         min_score: float = 0.0,
     ) -> Dict:
-        """Enhanced search with dynamic query understanding and contextual ranking"""
+        """Enhanced search with detailed logging"""
         try:
+            logger.info(f"Starting search for query: {query}")
+            logger.info(f"Model path: {model_path}")
+            logger.info(f"Parameters: max_items={max_items}, min_score={min_score}")
+
             if not query.strip():
+                logger.warning("Empty query received")
                 return {
                     "results": [],
                     "total": 0,
-                    "query_info": {
-                        "original": query,
-                        "error": "Empty query",
-                        "model_path": model_path,
-                    },
+                    "query_info": {"original": query, "error": "Empty query"},
                 }
 
-            # Load model data
+            # Load model data with logging
+            logger.info("Loading model data...")
             model_data = self.load_model(model_path)
             if not model_data:
+                logger.error(f"Failed to load model from {model_path}")
                 raise ValueError(f"Failed to load model from {model_path}")
 
+            logger.info("Model data loaded successfully")
+            logger.info(
+                f"Model metadata: {json.dumps(model_data.get('metadata', {}), indent=2)}"
+            )
+
             # Generate query embedding
+            logger.info("Generating query embedding...")
             model_name = model_data["metadata"]["models"]["embeddings"]
             query_embed = self.embedding_manager.generate_embedding([query], model_name)
             query_embedding = query_embed.reshape(-1)
+            logger.info(f"Query embedding shape: {query_embedding.shape}")
 
-            # Initialize hybrid search if needed
-            if not self.hybrid_search.bm25:
-                texts_path = os.path.join(
-                    AppConfig.BASE_MODEL_DIR, model_path, "processed_texts.json"
-                )
-                with open(texts_path, "r") as f:
-                    processed_texts = json.load(f)
-                self.hybrid_search.initialize(processed_texts)
+            # Load products with logging
+            logger.info("Loading products data...")
+            products_df = self._load_products(model_path)
+            if products_df is None:
+                logger.error("Failed to load products data")
+                raise ValueError("Failed to load products data")
 
-            # Calculate similarities with context
+            logger.info(f"Loaded products dataframe with shape: {products_df.shape}")
+            logger.info(f"Product columns: {list(products_df.columns)}")
+
+            # Calculate similarities
+            logger.info("Calculating similarities...")
             semantic_scores = np.dot(model_data["embeddings"], query_embedding)
             combined_scores, query_analysis = self.hybrid_search.hybrid_search(
                 query, semantic_scores, context=context
@@ -830,65 +911,34 @@ class SearchService:
 
             # Get top candidates
             top_k_idx = np.argsort(combined_scores)[-max_items * 2 :][::-1]
+            logger.info(f"Selected top {len(top_k_idx)} candidates for processing")
 
-            # Load products
-            products_df = self._load_products(model_path)
-            if products_df is None:
-                raise ValueError("Failed to load products data")
-
-            # Prepare candidates for reranking
+            # Process candidates with detailed logging
             candidates = []
             schema = model_data["metadata"]["schema_mapping"]
+            logger.info(f"Using schema mapping: {json.dumps(schema, indent=2)}")
 
             for idx in top_k_idx:
-                try:
-                    score = float(combined_scores[idx])
-                    if score < min_score:
-                        continue
-
-                    product = products_df.iloc[idx]
-                    text_parts = []
-
-                    # Get text fields based on schema
-                    for field in ["name", "description", "category"]:
-                        col_name = schema.get(f"{field}_column", field)
-                        if col_name in product:
-                            text_parts.append(str(product[col_name]))
-
-                    candidate = {
-                        "id": str(product[schema.get("id_column", "id")]),
-                        "name": str(product[schema.get("name_column", "name")]),
-                        "description": str(
-                            product[schema.get("description_column", "description")]
-                        ),
-                        "category": str(
-                            product.get(schema.get("category_column", "category"), "")
-                        ),
-                        "score": score,
-                        "text": " ".join(text_parts),
-                        "metadata": {},
-                    }
-
-                    # Add custom fields
-                    custom_fields = schema.get("custom_fields", [])
-                    for field in custom_fields:
-                        if field in product:
-                            candidate["metadata"][field] = str(product[field])
-
-                    candidates.append(candidate)
-
-                except Exception as e:
-                    logger.warning(f"Error processing candidate at index {idx}: {e}")
+                score = float(combined_scores[idx])
+                if score < min_score:
+                    logger.debug(f"Skipping candidate {idx} due to low score: {score}")
                     continue
 
-            # Rerank candidates with context
-            reranked_results = self.hybrid_search.rerank(
-                query, candidates, query_analysis, top_k=max_items
-            )
+                logger.info(f"Processing candidate at index {idx} with score {score}")
+                product = products_df.iloc[idx]
+                candidate = self._process_candidate(product, schema, score, idx)
+                if candidate:
+                    candidates.append(candidate)
+                    logger.info(f"Successfully added candidate {idx}")
+                else:
+                    logger.warning(f"Failed to process candidate {idx}")
 
+            logger.info(f"Successfully processed {len(candidates)} candidates")
+
+            # Return results
             return {
-                "results": reranked_results,
-                "total": len(reranked_results),
+                "results": candidates,
+                "total": len(candidates),
                 "query_info": {
                     "original": query,
                     "analysis": query_analysis,
@@ -897,7 +947,7 @@ class SearchService:
             }
 
         except Exception as e:
-            logger.error(f"Search error: {str(e)}")
+            logger.error(f"Search error: {str(e)}", exc_info=True)
             raise
 
     def _load_products(self, model_path: str) -> Optional[pd.DataFrame]:
@@ -1006,4 +1056,3 @@ if __name__ == "__main__":
         exit(1)
 
     app.run(host="0.0.0.0", port=AppConfig.SERVICE_PORT, debug=False)
-
