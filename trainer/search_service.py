@@ -130,7 +130,7 @@ class DynamicQueryUnderstanding:
 
         return features
 
-    async def analyze(self, query: str, context: Optional[Dict] = None) -> Dict:
+    def analyze(self, query: str, context: Optional[Dict] = None) -> Dict:
         """Comprehensive query analysis with dynamic understanding"""
         try:
             # Get dynamic categories
@@ -304,7 +304,7 @@ class HybridSearchEngine:
             logger.error(f"Failed to initialize BM25: {e}")
             raise
 
-    async def hybrid_search(
+    def hybrid_search(
         self,
         query: str,
         semantic_scores: np.ndarray,
@@ -317,7 +317,7 @@ class HybridSearchEngine:
 
         try:
             # Get query understanding
-            query_analysis = await self.query_understanding.analyze(query, context)
+            query_analysis = self.query_understanding.analyze(query, context)
 
             # Get BM25 scores
             tokenized_query = word_tokenize(query.lower())
@@ -389,7 +389,7 @@ class HybridSearchEngine:
             logger.error(f"Weight adjustment failed: {e}")
             return 0.7
 
-    async def rerank(
+    def rerank(
         self, query: str, candidates: List[Dict], query_analysis: Dict, top_k: int = 10
     ) -> List[Dict]:
         """Enhanced reranking with query understanding"""
@@ -782,7 +782,7 @@ class SearchService:
         self.hybrid_search = HybridSearchEngine()
         self._initialize_required_models()
 
-    async def search(
+    def search(
         self,
         query: str,
         model_path: str,
@@ -824,7 +824,7 @@ class SearchService:
 
             # Calculate similarities with context
             semantic_scores = np.dot(model_data["embeddings"], query_embedding)
-            combined_scores, query_analysis = await self.hybrid_search.hybrid_search(
+            combined_scores, query_analysis = self.hybrid_search.hybrid_search(
                 query, semantic_scores, context=context
             )
 
@@ -882,7 +882,7 @@ class SearchService:
                     continue
 
             # Rerank candidates with context
-            reranked_results = await self.hybrid_search.rerank(
+            reranked_results = self.hybrid_search.rerank(
                 query, candidates, query_analysis, top_k=max_items
             )
 
@@ -921,7 +921,7 @@ search_service = SearchService()
 
 
 @app.route("/search", methods=["POST"])
-async def search():
+def search():
     """Enhanced search endpoint with improved error handling"""
     try:
         data = request.get_json()
@@ -935,7 +935,7 @@ async def search():
             return jsonify({"error": "Missing required field: model_path"}), 400
 
         try:
-            results = await search_service.search(
+            results = search_service.search(
                 query=data["query"],
                 model_path=data["model_path"],
                 context=data.get("context"),
@@ -1006,3 +1006,4 @@ if __name__ == "__main__":
         exit(1)
 
     app.run(host="0.0.0.0", port=AppConfig.SERVICE_PORT, debug=False)
+
