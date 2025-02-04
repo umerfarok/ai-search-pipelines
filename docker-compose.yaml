@@ -17,8 +17,7 @@ services:
       AWS_REGION: ${AWS_REGION}
       AWS_ENDPOINT_URL: http://localstack:4566
       MONGO_URI: mongodb://root:example@mongo:27017
-      SEARCH_SERVICE_HOST: http://search-service:5000
-      TRAINING_SERVICE_HOST: http://training-service:5001
+      SEARCH_SERVICE_HOST: http://search-service:5001
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
@@ -27,10 +26,46 @@ services:
     depends_on:
       - mongo
       - redis
-      - search-service
       - training-service
     networks:
       - app-network
+
+  search-service:
+    build:
+      context: ./trainer
+      dockerfile: Dockerfile.python
+    environment:
+      # Unified cache configuration
+      TRANSFORMERS_CACHE: /app/cache/transformers
+      HF_HOME: /app/cache/huggingface
+      TORCH_HOME: /app/cache/torch
+      XDG_CACHE_HOME: /app/cache
+      # Model storage
+      MODEL_STORAGE_DIR: /app/models
+      # AWS configuration
+      AWS_ACCESS_KEY: ${AWS_ACCESS_KEY}
+      AWS_SECRET_KEY: ${AWS_SECRET_KEY}
+      S3_BUCKET: ${S3_BUCKET}
+      # GPU configuration
+      NVIDIA_VISIBLE_DEVICES: all
+      NLTK_DATA: /app/cache/nltk_data
+    command: ["python", "search_service.py"]
+    volumes:
+      - ./cache:/app/cache:rw  # Add explicit read-write flag
+      - ./models:/app/models:rw  # Add explicit read-write flag
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    runtime: nvidia
+    networks:
+      - app-network
+    depends_on:
+      - redis
+      - ml-base
 
   ml-base:
     build:
@@ -38,177 +73,59 @@ services:
       dockerfile: Dockerfile.base
     image: ml-base:latest
 
-  search-service:
-    build:
-      context: ./trainer
-      dockerfile: Dockerfile.python
-      args:
-        PYTHON_VERSION: 3.9
-        BUILD_TYPE: gpu
-        PYTORCH_INDEX: "https://download.pytorch.org/whl/cu118"
-        BASE_IMAGE: ml-base:latest
-    image: search-service:latest
-    environment:
-      PYTHONUNBUFFERED: 1
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      AWS_ACCESS_KEY: ${AWS_ACCESS_KEY}
-      AWS_SECRET_KEY: ${AWS_SECRET_KEY}
-      S3_BUCKET: ${S3_BUCKET}
-      AWS_REGION: ${AWS_REGION}
-      AWS_ENDPOINT_URL: http://localstack:4566
-      SERVICE_PORT: 5000
-      NVIDIA_VISIBLE_DEVICES: all
-      CUDA_VISIBLE_DEVICES: "0"  # Enable CUDA
-      FORCE_CPU: "0"  # Allow GPU usage
-      MODEL_CACHE_DIR: /app/models/cache  # Cache within shared directory
-      SHARED_MODELS_DIR: /app/models  # Simplified shared path
-      TRANSFORMER_CACHE: /app/model_cache/transformers
-      HF_HOME: /app/model_cache/huggingface
-      TORCH_HOME: /app/model_cache
-      CUDA_LAUNCH_BLOCKING: "1"  # For better error reporting
-      TORCH_USE_CUDA_DSA: "1"    # Enable device-side assertions
-      PYTORCH_NO_CUDA_MEMORY_CACHING: "1"  # Add this
-      S3_CACHE_DIR: /app/s3_cache
-      TEMP_DIR: /tmp/search
-      CUDA_DEVICE_MAX_CONNECTIONS: "1"
-      NCCL_P2P_DISABLE: "1"
-      MODEL_LOAD_DIR: /app/models/models  # Add explicit load directory
-      TRANSFORMERS_CACHE: "/app/model_cache/transformers"
-      XDG_CACHE_HOME: "/app/model_cache"
-    ports:
-      - "5000:5000"
-    command: ["python", "search_service.py"]
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    depends_on: 
-      - redis
-      - ml-base
-    networks:
-      - app-network
-    volumes:
-      - type: bind
-        source: ./cache/temp
-        target: /tmp/search
-      - type: bind
-        source: ./cache/s3_cache
-        target: /app/s3_cache
-      - type: bind
-        source: ./models
-        target: /app/models
-        read_only: false
-    user: "${UID:-1000}:${GID:-1000}"  # Explicit user mapping
-    entrypoint: >
-      /bin/sh -c "
-      python search_service.py
-      "
-    deploy:  # Add deploy configuration
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    runtime: nvidia  # Add this back
-
   training-service:
     build:
       context: ./trainer
       dockerfile: Dockerfile.python
-      args:
-        PYTHON_VERSION: 3.9
-        BUILD_TYPE: gpu
-        PYTORCH_INDEX: "https://download.pytorch.org/whl/cu118"
-        BASE_IMAGE: ml-base:latest
-    image: training-service:latest
     environment:
-      PYTHONUNBUFFERED: 1
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      AWS_ACCESS_KEY: ${AWS_ACCESS_KEY}
-      AWS_SECRET_KEY: ${AWS_SECRET_KEY}
-      S3_BUCKET: ${S3_BUCKET}
-      AWS_REGION: ${AWS_REGION}
-      AWS_ENDPOINT_URL: http://localstack:4566
-      SERVICE_PORT: 5001
+      # Shared cache configuration
+      TRANSFORMERS_CACHE: /app/cache/transformers
+      HF_HOME: /app/cache/huggingface
+      TORCH_HOME: /app/cache/torch
+      # Model storage
+      MODEL_STORAGE_DIR: /app/models
+      # Training-specific settings
       TRAINING_QUEUE: training_queue
       MODEL_PREFIX: model_status
-      NVIDIA_VISIBLE_DEVICES: all
-      CUDA_VISIBLE_DEVICES: "0"  # Enable CUDA
-      FORCE_CPU: "0"  # Allow GPU usage
-      MODEL_CACHE_DIR: /app/models/cache  # Same cache location
-      SHARED_MODELS_DIR: /app/models  # Same shared path
-      TRANSFORMER_CACHE: /app/model_cache/transformers
-      HF_HOME: /app/model_cache/huggingface
-      TORCH_HOME: /app/model_cache
-      TRANSFORMERS_OFFLINE: "0"  # Ensure we can download models
-      HF_DATASETS_OFFLINE: "0"
-      TRANSFORMERS_CACHE: /app/model_cache/transformers
-      CUDA_LAUNCH_BLOCKING: "1"  # For better error reporting
-      TORCH_USE_CUDA_DSA: "1"    # Enable device-side assertions
-      PYTORCH_CUDA_ALLOC_CONF: "max_split_size_mb:512"  # Help prevent memory fragmentation
-      MODEL_SAVE_DIR: /app/models/models  # Add explicit save directory
-      XDG_CACHE_HOME: "/app/model_cache"
     ports:
-      - "5001:5001"
+      - "5000:5000"
     command: ["python", "training_service.py"]
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    depends_on:
-      - redis
-      - ml-base
-    networks:
-      - app-network
     volumes:
-      - type: bind
-        source: ./cache/temp
-        target: /tmp/search
-      - type: bind
-        source: ./cache/s3_cache
-        target: /app/s3_cache
-      - type: bind
-        source: ./models
-        target: /app/models
-        read_only: false
-    tmpfs:
-      - /tmp:exec,size=4G  # Add more temp space
-    user: "${UID:-1000}:${GID:-1000}"  # Explicit user mapping
-    entrypoint: >
-      /bin/sh -c "
-      python training_service.py
-      "
-    deploy: 
+      - ./cache:/app/cache:rw  # Add explicit read-write flag
+      - ./models:/app/models:rw  # Add explicit read-write flag
+    deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    runtime: nvidia  
+    runtime: nvidia
+    depends_on:
+      redis:
+        condition: service_healthy
+      ml-base:
+        condition: service_started
+    networks:
+      - app-network
 
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
     command: redis-server --appendonly yes
-     
     volumes:
       - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 30s
-      timeout: 10s
+      interval: 10s
+      timeout: 5s
       retries: 3
+      start_period: 30s
     networks:
       - app-network
 
-  mongo:
+  mongo: 
     image: mongo:latest
     ports:
       - "27017:27017"
@@ -217,11 +134,6 @@ services:
       MONGO_INITDB_ROOT_PASSWORD: example
     volumes:
       - mongodb_data:/data/db
-    healthcheck:
-      test: ["CMD", "echo", "db.runCommand('ping').ok", "|", "mongosh", "localhost:27017/test", "--quiet"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
     networks:
       - app-network
 
@@ -265,38 +177,13 @@ services:
       - app-network
     depends_on:
       - api
-    volumes:
-      - type: bind
-        source: ./models
-        target: /app/models
-        consistency: cached
-      - type: bind
-        source: ./cache/model_cache
-        target: /app/model_cache
-        consistency: cached
-      - type: bind
-        source: ./cache/temp
-        target: /tmp/search
-      - type: bind
-        source: ./cache/s3_cache
-        target: /app/s3_cache
+    profiles:
+      - dev
 networks:
   app-network:
+    driver: bridge
 
 volumes:
-  models:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ./models
-      uid: "${UID:-1000}"
-      gid: "${GID:-1000}"
   mongodb_data:
-    driver: local
   redis_data:
-    driver: local
   localstack_data:
-    driver: local
-  model_cache:
-    driver: local
