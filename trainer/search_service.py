@@ -987,10 +987,10 @@ class SearchService:
                     candidates.append(candidate)
 
             # Rerank if needed
-            if len(candidates) > 1:
-                candidates = self.hybrid_search.rerank(
-                    query, candidates, query_analysis, top_k=max_items
-                )
+            # if len(candidates) > 1:
+            #     candidates = self.hybrid_search.rerank(
+            #         query, candidates, query_analysis, top_k=max_items
+            #     )
 
             logger.info(f"Successfully processed {len(candidates)} candidates")
 
@@ -999,7 +999,7 @@ class SearchService:
                 "total": len(candidates),
                 "query_info": {
                     "original": query,
-                    "analysis": query_analysis,
+                    "analysis": [],
                     "model": {"name": model_name, "path": model_path},
                 },
             }
