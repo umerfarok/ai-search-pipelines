@@ -38,7 +38,7 @@ export const MODEL_MAPPINGS = {
         path: "BAAI/bge-base-en-v1.5",
         description: "Medium-sized embedding model",
         tags: ["semantic", "balanced"],
-        isDefault: false
+        isDefault: false 
     },
     "bge-large": {
         name: "BGE Large",
@@ -66,10 +66,10 @@ export const getModelKey = (modelPath) => {
 const FormSection = ({ title, children, description, className = "" }) => (
     <div className={`mt-6 ${className}`}>
         <div className="flex items-center gap-2 mb-4">
-            <h3 className="text-sm font-medium text-gray-700">{title}</h3>
+            <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300">{title}</h3>
             {description && (
                 <Tooltip content={description}>
-                    <Info className="w-4 h-4 text-gray-400" />
+                    <Info className="w-4 h-4 text-gray-400 dark:text-gray-500" />
                 </Tooltip>
             )}
         </div>
@@ -79,39 +79,41 @@ const FormSection = ({ title, children, description, className = "" }) => (
 
 const Input = ({ label, error, ...props }) => (
     <div className="mb-4">
-        <label className="block text-sm font-medium text-gray-700 mb-2">{label}</label>
+        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">{label}</label>
         <input
             {...props}
-            className={`w-full p-2.5 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 
-                ${error ? 'border-red-300 bg-red-50' : 'border-gray-300'}`}
+            className={`w-full p-2.5 bg-white dark:bg-gray-900 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors
+                ${error ? 'border-red-300 bg-red-50 dark:border-red-800 dark:bg-red-900/50' : 'border-gray-300 dark:border-gray-700'}
+                dark:text-gray-100 dark:placeholder-gray-500`}
         />
-        {error && <p className="mt-1 text-sm text-red-600">{error}</p>}
+        {error && <p className="mt-1 text-sm text-red-600 dark:text-red-400">{error}</p>}
     </div>
 );
 
 const Select = ({ label, options, error, ...props }) => (
     <div className="mb-4">
-        <label className="block text-sm font-medium text-gray-700 mb-2">{label}</label>
+        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">{label}</label>
         <select
             {...props}
-            className={`w-full p-2.5 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500
-                ${error ? 'border-red-300 bg-red-50' : 'border-gray-300'}`}
+            className={`w-full p-2.5 bg-white dark:bg-gray-900 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors
+                ${error ? 'border-red-300 bg-red-50 dark:border-red-800 dark:bg-red-900/50' : 'border-gray-300 dark:border-gray-700'}
+                dark:text-gray-100`}
         >
             <option value="">Select {label.toLowerCase()}</option>
             {options.map(({ value, label, description }) => (
                 <option key={value} value={value} title={description}>{label}</option>
             ))}
         </select>
-        {error && <p className="mt-1 text-sm text-red-600">{error}</p>}
+        {error && <p className="mt-1 text-sm text-red-600 dark:text-red-400">{error}</p>}
     </div>
 );
 
 const Card = ({ title, subtitle, children, className = "" }) => (
-    <div className={`bg-white border border-gray-200 rounded-lg shadow-sm p-6 ${className}`}>
+    <div className={`bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-sm p-6 transition-colors ${className}`}>
         {title && (
             <div className="mb-6">
-                <h2 className="text-xl font-semibold text-gray-900">{title}</h2>
-                {subtitle && <p className="mt-1 text-sm text-gray-500">{subtitle}</p>}
+                <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">{title}</h2>
+                {subtitle && <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">{subtitle}</p>}
             </div>
         )}
         {children}
@@ -347,17 +349,15 @@ const useTraining = (configId) => {
 const StatusBadge = ({ status, showIcon = true }) => {
     const statusConfig = {
         [ModelStatus.COMPLETED]: {
-            color: "green",
-            icon: CheckCircle2,
-            text: "Completed"
+            color: "text-green-700 dark:text-green-400 bg-green-100 dark:bg-green-900/50",
+            icon: CheckCircle2
         },
         [ModelStatus.FAILED]: {
-            color: "red",
-            icon: XCircle,
-            text: "Failed"
+            color: "text-red-700 dark:text-red-400 bg-red-100 dark:bg-red-900/50",
+            icon: XCircle
         },
         [ModelStatus.PROCESSING]: {
-            color: "blue",
+            color: "text-blue-700 dark:text-blue-400 bg-blue-100 dark:bg-blue-900/50",
             icon: Loader2,
             text: "Processing",
             animate: true
@@ -378,16 +378,15 @@ const StatusBadge = ({ status, showIcon = true }) => {
             text: "Canceled"
         }
     }[status] || {
-        color: "gray",
-        icon: AlertCircle,
-        text: "Unknown"
+        color: "text-gray-700 dark:text-gray-400 bg-gray-100 dark:bg-gray-900/50",
+        icon: AlertCircle
     };
 
     const Icon = statusConfig.icon;
 
     return (
         <span className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-sm font-medium
-            bg-${statusConfig.color}-100 text-${statusConfig.color}-800`}>
+            ${statusConfig.color} transition-colors`}>
             {showIcon && (
                 <Icon className={`w-4 h-4 ${statusConfig.animate ? 'animate-spin' : ''}`} />
             )}
@@ -761,7 +760,7 @@ export default function ProductSearchConfig() {
         <div className="max-w-7xl mx-auto p-6 space-y-8">
             <div className="flex justify-between items-center">
                 <div>
-                    <h1 className="text-3xl font-bold text-gray-900">Product Search Configuration</h1>
+                    <h1 className="text-3xl font-bold text-white-900">Product Search Configuration</h1>
                     <p className="mt-2 text-gray-600">Configure and train your product search model</p>
                 </div>
             </div>
@@ -817,7 +816,7 @@ export default function ProductSearchConfig() {
                     >
                         <div
                             className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors
-                                        ${isUploading ? 'border-blue-300 bg-blue-50' : 'border-gray-300 hover:border-blue-500'}`}
+                                        ${isUploading ? 'border-blue-300 bg-blue-50 dark:border-blue-700 dark:bg-blue-900/20' : 'border-gray-300 dark:border-gray-700 hover:border-blue-500 dark:hover:border-blue-600'}`}
                             onDragOver={(e) => e.preventDefault()}
                             onDrop={(e) => {
                                 e.preventDefault();

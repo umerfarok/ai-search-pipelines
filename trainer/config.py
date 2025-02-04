@@ -5,13 +5,14 @@ import os
 @dataclass
 class AppConfig:
     # Redis Configuration
+    MIN_SCORE_THRESHOLD = 0.4
     REDIS_HOST: str = os.getenv("REDIS_HOST", "redis")
     REDIS_PORT: int = int(os.getenv("REDIS_PORT", 6379))
     REDIS_PASSWORD: str = os.getenv("REDIS_PASSWORD", "")
     TRAINING_QUEUE: str = "training_queue"
     MODEL_STATUS_PREFIX: str = "model_status:"
     REQUIRED_MODELS = ["BAAI/bge-large-en-v1.5"]
-    HF_TOKEN = os.getenv("HF_TOKEN", "hfghjkjjkgfdsa")
+    HF_TOKEN = os.getenv("HF_TOKEN", "sdfghjfds")
     API_HOST: str = os.getenv("API_HOST", "http://api:8080")
 
     # Service Configuration
@@ -186,43 +187,7 @@ class AppConfig:
             "passport",
             "visa",
             "adventure",
-        ],
-        "sports": [
-            "football",
-            "basketball",
-            "tennis",
-            "cricket",
-            "golf",
-            "swimming",
-            "athletics",
-            "coach",
-            "team",
-            "tournament",
-        ],
-        "entertainment": [
-            "movie",
-            "music",
-            "concert",
-            "theater",
-            "game",
-            "festival",
-            "celebrity",
-            "show",
-            "album",
-            "ticket",
-        ],
-        "fashion": [
-            "clothing",
-            "style",
-            "trend",
-            "designer",
-            "accessory",
-            "outfit",
-            "brand",
-            "model",
-            "runway",
-            "boutique",
-        ],
+        ]
     }
 
     @classmethod
