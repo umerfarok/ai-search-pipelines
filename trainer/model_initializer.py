@@ -147,7 +147,6 @@ class ModelInitializer:
         """Ensure cache directories exist with proper permissions"""
         directories = [
             AppConfig.TRANSFORMER_CACHE,
-            AppConfig.SENTENCE_TRANSFORMER_CACHE,
             AppConfig.BASE_MODEL_DIR
         ]
         
