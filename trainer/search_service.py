@@ -829,19 +829,39 @@ class SearchService:
         max_items: int = 10,
         min_score: float = 0.4,
     ) -> Dict:
-        """Enhanced intent-aware search"""
+        """Enhanced intent-aware search with improved error handling"""
         try:
             # Load model and data
             model_data = self.load_model(model_path)
             if not model_data:
-                raise ValueError(f"Failed to load model from {model_path}")
+                return {"error": f"Failed to load model from {model_path}"}
 
             products_df = self._load_products(model_path)
-            if products_df is None:
-                raise ValueError("Failed to load products data")
+            if products_df is None or products_df.empty:
+                return {"error": "Failed to load products data"}
+
+            # Initialize search engine if needed
+            texts = (
+                products_df[
+                    model_data["metadata"]["schema_mapping"].get(
+                        "descriptioncolumn", "description"
+                    )
+                ]
+                .astype(str)
+                .tolist()
+            )
+            if not self.hybrid_search.initialize(texts):
+                logger.warning(
+                    "Failed to initialize BM25, falling back to semantic search only"
+                )
 
             # Generate embeddings and scores
-            model_name = model_data["metadata"]["models"]["embeddings"]
+            model_name = model_data["metadata"]["models"].get("embeddings")
+            if not model_name:
+                return {
+                    "error": "Invalid model configuration - missing embeddings model"
+                }
+
             query_embed = self.embedding_manager.generate_embedding([query], model_name)
             semantic_scores = np.dot(model_data["embeddings"], query_embed.reshape(-1))
 
@@ -849,46 +869,83 @@ class SearchService:
             context = context or {}
             context.setdefault("previous_queries", []).append(query)
 
-            # Perform hybrid search
-            combined_scores, query_analysis = self.hybrid_search.hybrid_search(
-                query, semantic_scores, context=context
-            )
-            self.current_query_analysis = query_analysis
+            try:
+                # Perform hybrid search with fallback
+                combined_scores, search_analysis = self.hybrid_search.hybrid_search(
+                    query, semantic_scores, context=context
+                )
+            except Exception as e:
+                logger.warning(f"Hybrid search failed, using semantic scores: {str(e)}")
+                combined_scores = semantic_scores
+                search_analysis = {"error": str(e), "fallback": "semantic_only"}
 
-            # Get and process candidates
+            # Process results
             top_k_idx = np.argsort(combined_scores)[-max_items * 2 :][::-1]
             candidates = []
+
             for idx in top_k_idx:
                 score = float(combined_scores[idx])
                 if score >= min_score:
-                    candidate = self._process_candidate(
-                        products_df.iloc[idx],
-                        model_data["metadata"]["schema_mapping"],
-                        score,
-                        idx,
-                    )
-                    if candidate:
-                        candidates.append(candidate)
+                    try:
+                        candidate = self._process_candidate(
+                            products_df.iloc[idx],
+                            model_data["metadata"]["schema_mapping"],
+                            score,
+                            idx,
+                        )
+                        if candidate:
+                            candidates.append(candidate)
+                    except Exception as e:
+                        logger.warning(f"Failed to process candidate {idx}: {str(e)}")
+                        continue
 
-            # Rerank results
-            reranked = self.hybrid_search.rerank(
-                query, candidates, query_analysis, max_items
-            )
-
-            return {
-                "results": reranked[:max_items],
-                "total": len(reranked),
-                "query_info": {
-                    "original": query,
-                    "analysis": query_analysis,
-                    "context": context,
-                    "model": {"name": model_name, "path": model_path},
+            # Prepare streamlined response
+            results = {
+                "results": [
+                    {
+                        "id": item.get("id", ""),
+                        "name": item.get("name", ""),
+                        "category": item.get("category", ""),
+                        "score": round(float(item.get("score", 0)), 3),
+                        "metadata": {
+                            "intent_match": bool(item.get("intent_matches")),
+                            "category_match": bool(
+                                item.get("ranking_factors", {}).get("category_matches")
+                            ),
+                        },
+                    }
+                    for item in candidates[:max_items]
+                ],
+                "metadata": {
+                    "total_results": len(candidates),
+                    "query": query,
+                    "search_type": (
+                        "hybrid"
+                        if "fallback" not in search_analysis
+                        else "semantic_only"
+                    ),
                 },
             }
 
+            # Add query understanding if available
+            if (
+                isinstance(search_analysis, dict)
+                and "query_understanding" in search_analysis
+            ):
+                understanding = search_analysis["query_understanding"]
+                results["metadata"]["intent"] = understanding.get("intent", "unknown")
+                results["metadata"]["categories"] = understanding.get("categories", [])
+
+            return results
+
         except Exception as e:
             logger.error(f"Search error: {str(e)}")
-            return {"error": str(e)}
+            return {
+                "error": str(e),
+                "query": query,
+                "results": [],
+                "metadata": {"total_results": 0, "search_type": "failed"},
+            }
 
 
 # Initialize service
@@ -990,10 +1047,9 @@ class HybridSearchEngine:
             }
 
 
-# Update the search endpoint
 @app.route("/search", methods=["POST"])
 def search():
-    """Enhanced search endpoint with streamlined response"""
+    """Enhanced search endpoint with improved error handling"""
     try:
         data = request.get_json()
         if not data:
@@ -1002,12 +1058,7 @@ def search():
         required_fields = ["query", "model_path"]
         missing_fields = [field for field in required_fields if field not in data]
         if missing_fields:
-            return (
-                jsonify(
-                    {"error": f"Missing required fields: {', '.join(missing_fields)}"}
-                ),
-                400,
-            )
+            return jsonify({"error": f"Missing required fields: {', '.join(missing_fields)}"}), 400
 
         results = search_service.search(
             query=data["query"],
@@ -1018,51 +1069,29 @@ def search():
         )
 
         if "error" in results:
-            return jsonify({"error": results["error"], "query": data["query"]}), 400
-
-        # Streamline the response
-        streamlined_results = {
-            "results": [
-                {
-                    "id": item["id"],
-                    "name": item["name"],
-                    "category": item["category"],
-                    "score": round(item["score"], 3),
-                    "relevance": {
-                        "intent_match": bool(item.get("intent_matches", {})),
-                        "category_match": bool(
-                            item.get("ranking_factors", {}).get("category_matches")
-                        ),
-                    },
+            return jsonify({
+                "error": results["error"],
+                "query": data["query"],
+                "results": [],
+                "metadata": {
+                    "total_results": 0,
+                    "search_type": "failed"
                 }
-                for item in results.get("results", [])
-            ],
-            "metadata": {
-                "total_results": results.get("total", 0),
-                "query": results["query_info"]["original"],
-                "primary_intent": results["query_info"]["analysis"][
-                    "query_understanding"
-                ]["intent"],
-                "top_categories": results["query_info"]["analysis"][
-                    "query_understanding"
-                ]["categories"],
-            },
-        }
+            }), 400
 
-        return jsonify(streamlined_results)
+        return jsonify(results)
 
     except Exception as e:
         logger.error(f"Search endpoint error: {str(e)}")
-        return (
-            jsonify(
-                {
-                    "error": "Internal server error",
-                    "query": data.get("query", "unknown"),
-                }
-            ),
-            500,
-        )
-
+        return jsonify({
+            "error": "Internal server error",
+            "query": data.get("query", "unknown"),
+            "results": [],
+            "metadata": {
+                "total_results": 0,
+                "search_type": "failed"
+            }
+        }), 500
 
 @app.route("/health")
 def health():
