@@ -21,11 +21,7 @@ from rank_bm25 import BM25Okapi
 from nltk.tokenize import word_tokenize
 import nltk
 from transformers import (
-    pipeline,
-    AutoModelForSequenceClassification,
-    AutoTokenizer,
-    AutoModelForQuestionAnswering,
-    AutoModelForSeq2SeqGeneration,
+    pipeline
 )
 import json
 import spacy
