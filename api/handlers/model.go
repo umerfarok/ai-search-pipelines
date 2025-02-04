@@ -510,7 +510,7 @@ func (s *ConfigService) GetQueuedJobs(c *gin.Context) {
 		jobs = append(jobs, job)
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	c.JSON(http.StatusOK, gin.H{ 
 		"count": len(jobs),
 		"jobs":  jobs,
 	})

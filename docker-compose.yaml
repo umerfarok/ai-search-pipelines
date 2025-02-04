@@ -6,24 +6,66 @@ services:
       context: ./api
       dockerfile: Dockerfile
     ports:
-      - "8080:8080"
+       - "0.0.0.0:8080:8080"
     environment:
       PYTHONUNBUFFERED: 1
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      AWS_ACCESS_KEY: ${AWS_ACCESS_KEY}
+      AWS_ACCESS_KEY: ${AWS_ACCESS_KEY} 
       AWS_SECRET_KEY: ${AWS_SECRET_KEY}
       S3_BUCKET: ${S3_BUCKET}
       AWS_REGION: ${AWS_REGION}
       AWS_ENDPOINT_URL: http://localstack:4566
       MONGO_URI: mongodb://root:example@mongo:27017
-      SEARCH_SERVICE_HOST: http://training-service:5000
+      SEARCH_SERVICE_HOST: http://search-service:5001
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     depends_on:
       - mongo
       - redis
       - training-service
     networks:
       - app-network
+
+  search-service:
+    build:
+      context: ./trainer
+      dockerfile: Dockerfile.python
+    environment:
+      # Unified cache configuration
+      TRANSFORMERS_CACHE: /app/cache/transformers
+      HF_HOME: /app/cache/huggingface
+      TORCH_HOME: /app/cache/torch
+      XDG_CACHE_HOME: /app/cache
+      # Model storage
+      MODEL_STORAGE_DIR: /app/models
+      # AWS configuration
+      AWS_ACCESS_KEY: ${AWS_ACCESS_KEY}
+      AWS_SECRET_KEY: ${AWS_SECRET_KEY}
+      S3_BUCKET: ${S3_BUCKET}
+      # GPU configuration
+      NVIDIA_VISIBLE_DEVICES: all
+      NLTK_DATA: /app/cache/nltk_data
+    command: ["python", "search_service.py"]
+    volumes:
+      - ./cache:/app/cache:rw  # Add explicit read-write flag
+      - ./models:/app/models:rw  # Add explicit read-write flag
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    runtime: nvidia
+    networks:
+      - app-network
+    depends_on:
+      - redis
+      - ml-base
 
   ml-base:
     build:
@@ -35,81 +77,22 @@ services:
     build:
       context: ./trainer
       dockerfile: Dockerfile.python
-      args:
-        PYTHON_VERSION: 3.9
-        BUILD_TYPE: gpu
-        PYTORCH_INDEX: "https://download.pytorch.org/whl/cu118"
-        BASE_IMAGE: ml-base:latest
-    image: training-service:latest
     environment:
-      PYTHONUNBUFFERED: 1
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      AWS_ACCESS_KEY: ${AWS_ACCESS_KEY}
-      AWS_SECRET_KEY: ${AWS_SECRET_KEY}
-      S3_BUCKET: ${S3_BUCKET}
-      AWS_REGION: ${AWS_REGION}
-      AWS_ENDPOINT_URL: http://localstack:4566
-      SERVICE_PORT: 5001
+      # Shared cache configuration
+      TRANSFORMERS_CACHE: /app/cache/transformers
+      HF_HOME: /app/cache/huggingface
+      TORCH_HOME: /app/cache/torch
+      # Model storage
+      MODEL_STORAGE_DIR: /app/models
+      # Training-specific settings
       TRAINING_QUEUE: training_queue
       MODEL_PREFIX: model_status
-      NVIDIA_VISIBLE_DEVICES: all
-      CUDA_VISIBLE_DEVICES: "0"
-      TRANSFORMERS_CACHE: /app/cache/transformers
-      HF_HOME: /app/cache/huggingface
-      MODEL_CACHE_DIR: /app/cache/models
-    ports:
-      - "5001:5001"
-    command: ["python", "training_service.py"]
-    volumes:
-      - ./cache:/app/cache
-    depends_on:
-      - redis
-      - ml-base
-    networks:
-      - app-network
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    runtime: nvidia
-
-  search-service:
-    build:
-      context: ./trainer
-      dockerfile: Dockerfile.python
-      args:
-        PYTHON_VERSION: 3.9
-        BUILD_TYPE: gpu
-        PYTORCH_INDEX: "https://download.pytorch.org/whl/cu118"
-        BASE_IMAGE: ml-base:latest
-    image: search-service:latest
-    environment:
-      PYTHONUNBUFFERED: 1
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      AWS_ACCESS_KEY: ${AWS_ACCESS_KEY}
-      AWS_SECRET_KEY: ${AWS_SECRET_KEY}
-      S3_BUCKET: ${S3_BUCKET}
-      AWS_REGION: ${AWS_REGION}
-      AWS_ENDPOINT_URL: http://localstack:4566
-      SERVICE_PORT: 5000
-      TRANSFORMERS_CACHE: /app/cache/transformers
-      HF_HOME: /app/cache/huggingface
-      MODEL_CACHE_DIR: /app/cache/models
     ports:
       - "5000:5000"
-    command: ["python", "search_service.py"]
+    command: ["python", "training_service.py"]
     volumes:
-      - ./cache:/app/cache
-    depends_on:
-      - redis
-      - ml-base
-    networks:
-      - app-network
+      - ./cache:/app/cache:rw  # Add explicit read-write flag
+      - ./models:/app/models:rw  # Add explicit read-write flag
     deploy:
       resources:
         reservations:
@@ -118,6 +101,13 @@ services:
               count: 1
               capabilities: [gpu]
     runtime: nvidia
+    depends_on:
+      redis:
+        condition: service_healthy
+      ml-base:
+        condition: service_started
+    networks:
+      - app-network
 
   redis:
     image: redis:7-alpine
@@ -126,10 +116,16 @@ services:
     command: redis-server --appendonly yes
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     networks:
       - app-network
 
-  mongo:
+  mongo: 
     image: mongo:latest
     ports:
       - "27017:27017"
@@ -150,11 +146,25 @@ services:
       - AWS_DEFAULT_REGION=us-east-1
       - EDGE_PORT=4566
       - DEBUG=1
+      - PERSISTENCE=1
+      - DATA_DIR=/var/lib/localstack/data
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - LEGACY_DIRECTORIES=1
+      - DISABLE_CORS_CHECKS=1
+      - LOCALSTACK_VOLUME_DIR=/var/lib/localstack
+      - FORCE_NONINTERACTIVE=1
     volumes:
-      - ./localstack:/var/lib/localstack
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "./localstack/data:/var/lib/localstack/data"
+      - "./localstack/init-s3.sh:/docker-entrypoint-initaws.d/init-s3.sh"
+      - "./cache/s3:/var/lib/localstack/s3"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     networks:
       - app-network
-  
   frontend:
     build:
       context: ./playground 
@@ -171,7 +181,9 @@ services:
       - dev
 networks:
   app-network:
+    driver: bridge
 
 volumes:
   mongodb_data:
   redis_data:
+  localstack_data:

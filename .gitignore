@@ -8,3 +8,4 @@ playground/.next
 trainer/venv
 volume
 cache
+mongodb_data

@@ -744,7 +744,6 @@ export default function ProductSearchConfig() {
                     embedding_model: "all-minilm-l6",
                     batch_size: 128,
                     max_tokens: 512,
-                    llm_model: "distilgpt2"
                 }
             }));
 

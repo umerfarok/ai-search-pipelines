@@ -94,7 +94,11 @@ const useModelSearch = () => {
         setActiveFilters,
         currentPage,
         totalPages,
-        handlePageChange
+        handlePageChange,
+        setSearching,
+        setError ,
+        setCurrentPage,
+        setTotalPages,
     };
 };
 
@@ -354,7 +358,11 @@ export default function ModelSearchComponent() {
         setActiveFilters,
         currentPage,
         totalPages,
-        handlePageChange
+        setSearching ,
+        setError ,
+        setCurrentPage,
+        handlePageChange,
+        setTotalPages,
     } = useModelSearch();
 
     const [searchQuery, setSearchQuery] = useState('');

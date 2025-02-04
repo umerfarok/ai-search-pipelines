@@ -1,5 +1,6 @@
 # search_service.py
 
+from datetime import datetime
 import os
 import logging
 import threading
@@ -35,11 +36,7 @@ class QueryUnderstanding:
             "zero-shot-classification", model="facebook/bart-large-mnli"
         )
         self.nlp = spacy.load("en_core_web_sm")
-        self.domain_keywords = {
-            "tech": ["wifi", "laptop", "battery", "app", "smartphone", "tablet"],
-            "fashion": ["clothing", "style", "trend", "designer", "accessory"],
-            # Add other domains as needed
-        }
+        self.domain_keywords = AppConfig.DOMAIN_KEYWORDS
 
     def analyze(self, query: str) -> Dict:
         try:
@@ -81,10 +78,27 @@ class HybridSearchEngine:
         self.tokenized_corpus = None
         self.reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
+    def _init_reranker(self):
+        """Lazy initialization of reranker"""
+        if self.reranker is None:
+            try:
+                self.reranker = CrossEncoder(self.reranker_name)
+            except Exception as e:
+                logger.error(f"Failed to initialize reranker: {e}")
+                raise
+
     def initialize(self, texts: List[str]):
         """Initialize BM25 with corpus"""
-        self.tokenized_corpus = [word_tokenize(text.lower()) for text in texts]
-        self.bm25 = BM25Okapi(self.tokenized_corpus)
+        try:
+            if not texts:
+                raise ValueError("Empty text corpus")
+                
+            self.tokenized_corpus = [word_tokenize(text.lower()) for text in texts]
+            self.bm25 = BM25Okapi(self.tokenized_corpus)
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize BM25: {e}")
+            raise
 
     def hybrid_search(
         self, query: str, semantic_scores: np.ndarray, alpha: float = 0.7
@@ -111,17 +125,26 @@ class HybridSearchEngine:
         return combined_scores
 
     def rerank(self, query: str, candidates: List[Dict], top_k: int = 10) -> List[Dict]:
+        """Rerank results using cross-encoder with improved error handling"""
         if not candidates:
             return []
 
-        pairs = [(query, doc["text"]) for doc in candidates]
-        scores = self.reranker.predict(pairs)
+        try:
+            self._init_reranker()
+            
+            pairs = [(query, doc["text"]) for doc in candidates]
+            scores = self.reranker.predict(pairs)
 
-        for i, score in enumerate(scores):
-            candidates[i]["rerank_score"] = float(score)
+            for i, score in enumerate(scores):
+                candidates[i]["rerank_score"] = float(score)
 
-        reranked = sorted(candidates, key=lambda x: x["rerank_score"], reverse=True)
-        return reranked[:top_k]
+            reranked = sorted(candidates, key=lambda x: x["rerank_score"], reverse=True)
+            return reranked[:top_k]
+
+        except Exception as e:
+            logger.error(f"Reranking failed: {e}")
+            # Fallback to original ordering if reranking fails
+            return candidates[:top_k]
 
 
 class EmbeddingManager:
@@ -132,50 +155,28 @@ class EmbeddingManager:
         self.tokenizers = {}
         self.max_seq_length = 512
         self.cache_dir = AppConfig.TRANSFORMER_CACHE
-        self.MODEL_MAPPINGS = {
-            "all-minilm-l6": {
-                "path": "sentence-transformers/all-MiniLM-L6-v2",
-                "description": "Compact and efficient embedding model",
-                "is_default": False,
-            },
-            "bge-small": {
-                "path": "BAAI/bge-small-en-v1.5",
-                "description": "Small, efficient embedding model",
-                "is_default": False,
-            },
-            "bge-base": {
-                "path": "BAAI/bge-base-en-v1.5",
-                "description": "Base, balanced performance embedding model",
-                "is_default": False,
-            },
-            "bge-large": {
-                "path": "BAAI/bge-large-en-v1.5",
-                "description": "Large, high-performance embedding model",
-                "is_default": False,
-            },
-            "paraphrase-multilingual-mpnet-base-v2": {
-                "path": "sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
-                "description": "Multilingual, high-performance embedding model",
-                "is_default": True,
-            },
-        }
-        self.default_model_name = "all-minilm-l6"
+
+        # Exact model mappings matching frontend configuration
+        self.MODEL_MAPPINGS = self.MODEL_MAPPINGS = AppConfig.MODEL_MAPPINGS
+        self.default_model_name = "all-minilm-l6"  # Matches frontend default
 
     def _get_model_info(self, model_name: str) -> dict:
-        """Get model information from MODEL_MAPPINGS with fallback"""
+        """Get model information with improved path matching"""
+        # Check by key first
         if model_name in self.MODEL_MAPPINGS:
             return self.MODEL_MAPPINGS[model_name]
+        
+        # Check by path
+        for key, info in self.MODEL_MAPPINGS.items():
+            if info["path"] == model_name:
+                return info
+                
+        # For direct paths that match our supported models
+        for key, info in self.MODEL_MAPPINGS.items():
+            if model_name.lower().replace("-", "") in info["path"].lower().replace("-", ""):
+                return info
 
-        # Check if it's a direct Hugging Face path
-        if any(model_name.startswith(p) for p in ["sentence-transformers/", "BAAI/"]):
-            return {
-                "name": model_name.split("/")[-1],
-                "path": model_name,
-                "description": "Custom model from Hugging Face",
-                "is_default": False,
-            }
-
-        return None
+        raise ValueError(f"Unsupported model: {model_name}. Please use one of: {list(self.MODEL_MAPPINGS.keys())}")
 
     def get_model(self, model_name: str = None):
         if not model_name:
@@ -186,54 +187,90 @@ class EmbeddingManager:
             raise ValueError(f"Unsupported model: {model_name}")
 
         model_path = model_info["path"]
-        logger.info(f"Attempting to load model: {model_path}")
-
+        
         if model_path in self.embedding_models:
             return self.embedding_models[model_path]
 
         try:
             with self.model_load_lock:
-                # Try loading with sentence-transformers first
-                try:
+                if model_path not in self.embedding_models:
+                    logger.info(f"Loading model: {model_path}")
                     model = SentenceTransformer(
-                        model_path, cache_folder=self.cache_dir, device=self.device
+                        model_path,
+                        cache_folder=self.cache_dir,
+                        device=self.device
                     )
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to load with sentence-transformers, trying transformers: {e}"
-                    )
-                    from transformers import AutoModel
-
-                    model = AutoModel.from_pretrained(
-                        model_path, cache_dir=self.cache_dir
-                    )
+                    
+                    # Verify model dimension
+                    actual_dim = model.get_sentence_embedding_dimension()
+                    expected_dim = model_info["dimension"]
+                    if actual_dim != expected_dim:
+                        raise ValueError(
+                            f"Model dimension mismatch for {model_name}: "
+                            f"expected {expected_dim}, got {actual_dim}"
+                        )
+                    
                     self.embedding_models[model_path] = model
-
-                logger.info(f"Successfully loaded model: {model_path}")
-                return model
+                    logger.info(f"Successfully loaded model: {model_path}")
+                return self.embedding_models[model_path]
 
         except Exception as e:
             logger.error(f"Failed to load model {model_path}: {str(e)}")
             raise RuntimeError(f"Model loading failed: {model_path}") from e
 
+    def get_model_dimension(self, model_name: str) -> int:
+        """Get the embedding dimension for a model"""
+        model_info = self._get_model_info(model_name)
+        if not model_info:
+            raise ValueError(f"Cannot determine dimension for model: {model_name}")
+        return model_info["dimension"]
+
     def generate_embedding(self, text: List[str], model_name: str = None) -> np.ndarray:
+        """Generate embeddings with improved error handling"""
+        if not text:
+            raise ValueError("Empty text input")
+            
         model = self.get_model(model_name)
         if model is None:
             raise ValueError(f"Model {model_name} not initialized")
 
+        # Dynamic batch size based on available memory
         batch_size = 512 if torch.cuda.is_available() else 128
-        with torch.no_grad():
-            embeddings = model.encode(
-                text,
-                convert_to_tensor=True,
-                show_progress_bar=False,
-                truncate_dim=512,
-                device=self.device,
-                batch_size=batch_size,
-                normalize_embeddings=True,
-            )
+        
+        try:
+            with torch.no_grad():
+                embeddings = model.encode(
+                    text,
+                    convert_to_tensor=True,
+                    show_progress_bar=False,
+                    device=self.device,
+                    batch_size=batch_size,
+                    normalize_embeddings=True
+                )
+                
+                # Verify embedding dimension
+                expected_dim = self.get_model_dimension(model_name)
+                if embeddings.shape[1] != expected_dim:
+                    raise ValueError(
+                        f"Generated embedding dimension {embeddings.shape[1]} "
+                        f"doesn't match expected {expected_dim}"
+                    )
+                
+                return embeddings.cpu().numpy()
+        except Exception as e:
+            logger.error(f"Error generating embeddings: {e}")
+            raise
+        finally:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
-            return embeddings.cpu().numpy()
+    def validate_model_name(self, model_name: str) -> bool:
+        """Validate if a model name is supported"""
+        try:
+            self._get_model_info(model_name)
+            return True
+        except ValueError:
+            return False
 
 
 class S3Manager:
@@ -302,52 +339,87 @@ class SearchService:
         self.embedding_manager = EmbeddingManager()
         self.query_analyzer = QueryUnderstanding()
         self.hybrid_search = HybridSearchEngine()
+        self._initialize_required_models()
+
+    def _initialize_required_models(self):
+        """Preload required models during initialization"""
+        try:
+            for model_key in AppConfig.REQUIRED_MODELS:
+                logger.info(f"Preloading model: {model_key}")
+                self.embedding_manager.get_model(model_key)
+            logger.info("Successfully preloaded all required models")
+        except Exception as e:
+            logger.error(f"Error preloading models: {e}")
 
     def search(
-        self, query: str, model_path: str, max_items: int = 10, alpha: float = 0.7
+        self, 
+        query: str, 
+        model_path: str, 
+        max_items: int = 10, 
+        alpha: float = 0.7,
+        min_score: float = 0.0
     ) -> Dict:
         try:
+            if not query.strip():
+                return {
+                    "results": [],
+                    "total": 0,
+                    "query_info": {
+                        "original": query,
+                        "enhanced": query,
+                        "error": "Empty query",
+                        "model_path": model_path
+                    }
+                }
+
             # Load model data
             model_data = self.load_model(model_path)
             if not model_data:
                 raise ValueError(f"Failed to load model from {model_path}")
 
-            # Analyze query and enhance it
+            # Analyze and enhance query
             query_analysis = self.query_analyzer.analyze(query)
             enhanced_query = f"{query} {' '.join(query_analysis['expanded_terms'])}"
 
-            # Get model name from metadata and generate query embedding
+            # Get model name from metadata and verify dimensions
             model_name = model_data["metadata"]["models"]["embeddings"]
+            stored_dimension = model_data["embeddings"].shape[1]
+            expected_dimension = self.embedding_manager.get_model_dimension(model_name)
+            
+            if stored_dimension != expected_dimension:
+                raise ValueError(
+                    f"Embedding dimension mismatch: stored={stored_dimension}, "
+                    f"expected={expected_dimension} for model {model_name}"
+                )
+
+            # Generate query embedding
             try:
-                query_embed = self.embedding_manager.generate_embedding(
-                    [enhanced_query], model_name
-                )
-                query_embedding = (
-                    query_embed.reshape(-1) if query_embed.ndim > 1 else query_embed
-                )
+                query_embed = self.embedding_manager.generate_embedding([enhanced_query], model_name)
+                query_embedding = query_embed.reshape(-1)
             finally:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
             # Initialize hybrid search if needed
             if not self.hybrid_search.bm25:
-                with open(
-                    os.path.join(
-                        AppConfig.BASE_MODEL_DIR, model_path, "processed_texts.json"
-                    ),
-                    "r",
-                ) as f:
+                texts_path = os.path.join(AppConfig.BASE_MODEL_DIR, model_path, "processed_texts.json")
+                if not os.path.exists(texts_path):
+                    raise FileNotFoundError(f"Processed texts not found at {texts_path}")
+                    
+                with open(texts_path, "r") as f:
                     processed_texts = json.load(f)
                 self.hybrid_search.initialize(processed_texts)
 
             # Calculate similarities
             semantic_scores = np.dot(model_data["embeddings"], query_embedding)
             combined_scores = self.hybrid_search.hybrid_search(
-                enhanced_query, semantic_scores, alpha=alpha
+                enhanced_query,
+                semantic_scores,
+                alpha=alpha
             )
 
             # Get top candidates
-            top_k_idx = np.argsort(combined_scores)[-max_items * 2 :][::-1]
+            top_k_idx = np.argsort(combined_scores)[-max_items * 2:][::-1]
 
             # Load products
             products_df = self._load_products(model_path)
@@ -358,43 +430,57 @@ class SearchService:
             schema = model_data["metadata"]["schema_mapping"]
             candidates = []
 
+            # Map schema keys correctly
+            schema_mapping = {
+                "id": schema.get("id_column") or schema.get("idcolumn"),
+                "name": schema.get("name_column") or schema.get("namecolumn"),
+                "description": schema.get("description_column") or schema.get("descriptioncolumn"),
+                "category": schema.get("category_column") or schema.get("categorycolumn")
+            }
+
             for idx in top_k_idx:
-                score = float(combined_scores[idx])
-                if score < AppConfig.MIN_SCORE:
+                try:
+                    score = float(combined_scores[idx])
+                    if score < min_score:
+                        continue
+
+                    product = products_df.iloc[idx]
+
+                    # Build text for ranking with fallback column names
+                    text_parts = []
+                    for col in [schema_mapping["name"], schema_mapping["description"], schema_mapping["category"]]:
+                        if col in product:
+                            text_parts.append(str(product[col]))
+                        else:
+                            logger.warning(f"Column {col} not found in product data")
+
+                    candidate = {
+                        "id": str(product[schema_mapping["id"]]),
+                        "name": str(product[schema_mapping["name"]]),
+                        "description": str(product[schema_mapping["description"]]),
+                        "category": str(product[schema_mapping["category"]]),
+                        "score": score,
+                        "text": " ".join(text_parts),
+                        "metadata": {}
+                    }
+
+                    # Add custom fields
+                    custom_columns = schema.get("custom_columns", [])
+                    for col in custom_columns:
+                        if isinstance(col, dict) and "name" in col and col["name"] in product:
+                            candidate["metadata"][col["name"]] = str(product[col["name"]])
+
+                    candidates.append(candidate)
+
+                except Exception as e:
+                    logger.warning(f"Error processing candidate at index {idx}: {e}")
                     continue
-
-                product = products_df.iloc[idx]
-
-                # Create text representation for reranking
-                text_parts = [
-                    str(product[schema["namecolumn"]]),
-                    str(product[schema["descriptioncolumn"]]),
-                    str(product[schema["categorycolumn"]]),
-                ]
-
-                candidate = {
-                    "id": str(product[schema["idcolumn"]]),
-                    "name": str(product[schema["namecolumn"]]),
-                    "description": str(product[schema["descriptioncolumn"]]),
-                    "category": str(product[schema["categorycolumn"]]),
-                    "score": score,
-                    "text": " ".join(text_parts),
-                    "metadata": {},
-                }
-
-                # Add custom fields
-                if "customcolumns" in schema:
-                    for col in schema["customcolumns"]:
-                        if col["name"] in product:
-                            candidate["metadata"][col["name"]] = str(
-                                product[col["name"]]
-                            )
-
-                candidates.append(candidate)
 
             # Rerank candidates
             reranked_results = self.hybrid_search.rerank(
-                enhanced_query, candidates, top_k=max_items
+                enhanced_query,
+                candidates,
+                top_k=max_items
             )
 
             return {
@@ -405,11 +491,16 @@ class SearchService:
                     "enhanced": enhanced_query,
                     "analysis": query_analysis,
                     "model_path": model_path,
-                },
+                    "model": {
+                        "name": model_name,
+                        "dimension": expected_dimension
+                    },
+                    "schema": schema_mapping,  # Include schema mapping in response for debugging
+                }
             }
 
         except Exception as e:
-            logger.error(f"Search error: {e}")
+            logger.error(f"Search error: {str(e)}")
             raise
 
     def _load_products(self, model_path: str) -> Optional[pd.DataFrame]:
@@ -419,6 +510,7 @@ class SearchService:
         return self.s3_manager.get_csv_content(f"{model_path}/products.csv")
 
     def load_model(self, model_path: str) -> Optional[Dict]:
+        """Enhanced model loading with better metadata handling"""
         try:
             cached_data = self.model_cache.get(model_path)
             if cached_data:
@@ -436,9 +528,26 @@ class SearchService:
 
     def _load_from_local(self, model_dir: str, model_path: str) -> Optional[Dict]:
         try:
-            embeddings = np.load(os.path.join(model_dir, "embeddings.npy"))
+            # Load embeddings
+            embeddings_path = os.path.join(model_dir, "embeddings.npy")
+            embeddings = np.load(embeddings_path)
+
+            # Load and validate metadata
             with open(os.path.join(model_dir, "metadata.json"), "r") as f:
                 metadata = json.load(f)
+
+            # Verify model configuration
+            if "models" not in metadata or "embeddings" not in metadata["models"]:
+                raise ValueError("Invalid metadata: missing model information")
+
+            model_name = metadata["models"]["embeddings"]
+            expected_dim = self.embedding_manager.get_model_dimension(model_name)
+            
+            if embeddings.shape[1] != expected_dim:
+                raise ValueError(
+                    f"Embedding dimension mismatch: stored={embeddings.shape[1]}, "
+                    f"expected={expected_dim} for model {model_name}"
+                )
 
             data = {
                 "embeddings": embeddings,
@@ -451,35 +560,63 @@ class SearchService:
 
         except Exception as e:
             logger.error(f"Error loading from local: {e}")
-            return None
-
+            return None       
     def _load_from_s3(self, model_path: str) -> Optional[Dict]:
         try:
             model_dir = os.path.join(AppConfig.BASE_MODEL_DIR, model_path)
             os.makedirs(model_dir, exist_ok=True)
 
-            files = [
+            required_files = [
                 "embeddings.npy",
                 "metadata.json",
                 "products.csv",
-                "processed_texts.json",
+                "processed_texts.json"
             ]
-            for file in files:
+
+            # Download all required files
+            for file in required_files:
                 s3_path = f"{model_path}/{file}"
                 local_path = os.path.join(model_dir, file)
 
                 if not self.s3_manager.download_file(s3_path, local_path):
-                    logger.error(f"Failed to download required file: {file}")
+                    logger.error(f"Failed to download {file}")
                     return None
 
             return self._load_from_local(model_dir, model_path)
         except Exception as e:
             logger.error(f"Error loading from S3: {e}")
             return None
-
-
-# Initialize services
+        
+        
+        
 search_service = SearchService()
+
+
+def initialize_service():
+    """Initialize search service with model preloading"""
+    logger.info("Initializing search service...")
+
+    try:
+        # Setup cache directories and environment
+        AppConfig.setup_cache_dirs()
+
+        # Initialize the search service (this will preload models)
+
+        search_service._initialize_required_models()
+
+        # Download required NLTK data
+        try:
+            nltk.download("punkt")
+        except Exception as e:
+            logger.error(f"Failed to download NLTK data: {e}")
+            return False
+
+        logger.info("Search service initialization completed")
+        return True
+
+    except Exception as e:
+        logger.error(f"Service initialization failed: {e}")
+        return False
 
 
 # Flask routes
@@ -497,6 +634,7 @@ def search():
             max_items=data.get("max_items", 10),
             alpha=data.get("alpha", 0.7),
         )
+        print(results)
         return jsonify(results)
 
     except Exception as e:
@@ -547,6 +685,19 @@ def initialize_service():
         os.makedirs(AppConfig.BASE_MODEL_DIR, exist_ok=True)
         os.makedirs(AppConfig.TRANSFORMER_CACHE, exist_ok=True)
 
+        # Configure NLTK data directory FIRST
+        nltk_data_dir = os.getenv("NLTK_DATA", "/app/cache/nltk_data")
+        os.makedirs(nltk_data_dir, exist_ok=True)
+        nltk.data.path.append(nltk_data_dir)
+
+        # Now download required NLTK data
+        try:
+            nltk.download("punkt", download_dir=nltk_data_dir)
+            nltk.download("punkt_tab", download_dir=nltk_data_dir)
+        except Exception as e:
+            logger.error(f"Failed to download NLTK data: {e}")
+            return False
+
         logger.info("Search service initialization completed")
         return True
 
@@ -556,6 +707,7 @@ def initialize_service():
 
 
 if __name__ == "__main__":
+    print("Starting search service...")
     if not initialize_service():
         logger.error("Service initialization failed")
         exit(1)
