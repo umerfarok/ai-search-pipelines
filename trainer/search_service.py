@@ -288,18 +288,43 @@ class HybridSearchEngine:
         self.reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
         self.query_understanding = DynamicQueryUnderstanding()
 
-    def initialize(self, texts: List[str]):
-        """Initialize search engine with corpus"""
+    def initialize(self, texts: List[str]) -> bool:
+        """Initialize search engine with corpus and better error handling"""
         try:
             if not texts:
-                raise ValueError("Empty text corpus")
+                logger.error("Empty text corpus")
+                return False
 
-            self.tokenized_corpus = [word_tokenize(text.lower()) for text in texts]
-            self.bm25 = BM25Okapi(self.tokenized_corpus)
+            logger.info(f"Initializing BM25 with {len(texts)} documents")
+
+            # Tokenize texts with error handling for each document
+            self.tokenized_corpus = []
+            for i, text in enumerate(texts):
+                try:
+                    if pd.isna(text) or not isinstance(text, str):
+                        tokenized = []
+                    else:
+                        tokenized = word_tokenize(text.lower())
+                    self.tokenized_corpus.append(tokenized)
+                except Exception as e:
+                    logger.warning(f"Error tokenizing document {i}: {e}")
+                    self.tokenized_corpus.append([])
+
+            # Initialize BM25
+            try:
+                self.bm25 = BM25Okapi(self.tokenized_corpus)
+                logger.info("BM25 initialization successful")
+                return True
+            except Exception as e:
+                logger.error(f"BM25 initialization failed: {e}")
+                self.bm25 = None
+                return False
 
         except Exception as e:
-            logger.error(f"Failed to initialize BM25: {e}")
-            raise
+            logger.error(f"Search engine initialization failed: {e}")
+            self.bm25 = None
+            self.tokenized_corpus = None
+            return False
 
     def hybrid_search(
         self,
@@ -308,40 +333,119 @@ class HybridSearchEngine:
         context: Optional[Dict] = None,
         alpha: float = 0.7,
     ) -> Tuple[np.ndarray, Dict]:
-        """Enhanced hybrid search with contextual understanding"""
-        if not query.strip():
-            return np.zeros_like(semantic_scores), {}
-
+        """Enhanced hybrid search with better error handling"""
         try:
+            if not query.strip():
+                return semantic_scores, {
+                    "error": "Empty query",
+                    "scores": {
+                        "semantic": (
+                            semantic_scores.tolist()
+                            if semantic_scores is not None
+                            else []
+                        ),
+                        "lexical": [],
+                        "combined": (
+                            semantic_scores.tolist()
+                            if semantic_scores is not None
+                            else []
+                        ),
+                    },
+                }
+
+            # Initialize BM25 if not already initialized
+            if self.bm25 is None or self.tokenized_corpus is None:
+                logger.error("BM25 not initialized properly")
+                return semantic_scores, {
+                    "error": "Search index not initialized",
+                    "scores": {
+                        "semantic": (
+                            semantic_scores.tolist()
+                            if semantic_scores is not None
+                            else []
+                        ),
+                        "lexical": [],
+                        "combined": (
+                            semantic_scores.tolist()
+                            if semantic_scores is not None
+                            else []
+                        ),
+                    },
+                }
+
             # Get query understanding
-            query_analysis = self.query_understanding.analyze(query, context)
+            try:
+                query_analysis = self.query_understanding.analyze(query, context)
+            except Exception as e:
+                logger.error(f"Query analysis failed: {e}")
+                query_analysis = {"error": str(e)}
 
             # Get BM25 scores
-            tokenized_query = word_tokenize(query.lower())
-            bm25_scores = np.array(self.bm25.get_scores(tokenized_query))
+            try:
+                tokenized_query = word_tokenize(query.lower())
+                bm25_scores = np.array(self.bm25.get_scores(tokenized_query))
+            except Exception as e:
+                logger.error(f"BM25 scoring failed: {e}")
+                bm25_scores = np.zeros_like(semantic_scores)
 
             # Normalize scores
             bm25_scores = self._normalize_scores(bm25_scores)
             semantic_scores = self._normalize_scores(semantic_scores)
 
             # Adjust weights based on query understanding
-            alpha = self._adjust_weights(query_analysis)
+            try:
+                alpha = self._adjust_weights(query_analysis)
+            except Exception as e:
+                logger.error(f"Weight adjustment failed: {e}")
+                # Fall back to default alpha
 
             # Combine scores
             combined_scores = alpha * semantic_scores + (1 - alpha) * bm25_scores
 
-            return combined_scores, query_analysis
+            return combined_scores, {
+                "query_understanding": query_analysis,
+                "scores": {
+                    "semantic": semantic_scores.tolist(),
+                    "lexical": bm25_scores.tolist(),
+                    "combined": combined_scores.tolist(),
+                },
+                "weights": {"semantic": alpha, "lexical": 1 - alpha},
+            }
 
         except Exception as e:
             logger.error(f"Hybrid search failed: {e}")
-            return semantic_scores, {"error": str(e)}
+            # Return semantic scores as fallback with error info
+            return semantic_scores, {
+                "error": str(e),
+                "scores": {
+                    "semantic": (
+                        semantic_scores.tolist() if semantic_scores is not None else []
+                    ),
+                    "lexical": [],
+                    "combined": (
+                        semantic_scores.tolist() if semantic_scores is not None else []
+                    ),
+                },
+            }
 
     def _normalize_scores(self, scores: np.ndarray) -> np.ndarray:
-        """Normalize score array"""
-        score_range = scores.max() - scores.min()
-        if score_range > 0:
-            return (scores - scores.min()) / score_range
-        return scores
+        """Normalize score array with error handling"""
+        try:
+            if scores is None:
+                return np.array([])
+
+            # Handle zero arrays
+            if np.all(scores == 0):
+                return scores
+
+            score_range = scores.max() - scores.min()
+            if score_range > 0:
+                return (scores - scores.min()) / score_range
+            return scores
+
+        except Exception as e:
+            logger.error(f"Score normalization failed: {e}")
+            return np.zeros_like(scores) if scores is not None else np.array([])
 
     def _adjust_weights(self, query_analysis: Dict) -> float:
         """Dynamically adjust weights based on query analysis"""
@@ -782,21 +886,14 @@ class SearchService:
     def _process_candidate(
         self, product: pd.Series, schema: Dict, score: float, idx: int
     ) -> Dict:
-        """Process a single candidate with detailed logging"""
+        """Process a single candidate with proper schema mapping"""
         try:
-            # Log initial processing attempt
-            logger.info(f"Processing candidate at index {idx}")
-            logger.info(f"Schema mapping: {json.dumps(schema, indent=2)}")
-            logger.info(f"Product columns: {list(product.index)}")
-
             text_parts = []
 
-            # Log ID column detection
-            id_column = schema.get("id_column", "id")
+            # Get ID with proper schema key
+            id_column = schema.get("idcolumn", "ratings")
             logger.info(f"Looking for ID in column: {id_column}")
-            logger.info(f"Available columns: {list(product.index)}")
 
-            # Get ID with fallback to index
             if id_column in product:
                 candidate_id = str(product[id_column])
                 logger.info(f"Found ID in column {id_column}: {candidate_id}")
@@ -806,24 +903,21 @@ class SearchService:
                     f"ID column '{id_column}' not found, using index: {candidate_id}"
                 )
 
-            # Log field mappings
+            # Updated field mappings to match schema
             field_mappings = {
-                "name": schema.get("name_column", "name"),
-                "description": schema.get("description_column", "description"),
-                "category": schema.get("category_column", "category"),
+                "name": schema.get("namecolumn", "name"),
+                "description": schema.get("descriptioncolumn", "sub_category"),
+                "category": schema.get("categorycolumn", "main_category"),
             }
-            logger.info(f"Field mappings: {json.dumps(field_mappings, indent=2)}")
 
             candidate = {"id": candidate_id, "score": score, "metadata": {}}
 
-            # Process each field with detailed logging
+            # Process each field with proper column mapping
             for field, column in field_mappings.items():
                 logger.info(f"Processing field '{field}' using column '{column}'")
                 if column in product:
                     value = str(product[column])
-                    logger.info(
-                        f"Found value for {field}: {value[:100]}..."
-                    )  # Log first 100 chars
+                    logger.info(f"Found value for {field}: {value[:100]}...")
                 else:
                     value = ""
                     logger.warning(f"Column '{column}' not found for field '{field}'")
@@ -834,16 +928,12 @@ class SearchService:
 
             candidate["text"] = " ".join(text_parts)
 
-            # Log custom fields processing
-            custom_fields = schema.get("custom_fields", [])
-            logger.info(f"Processing custom fields: {custom_fields}")
+            # Process custom fields
+            custom_fields = schema.get("customcolumns", [])
             for field in custom_fields:
                 if field in product:
                     value = str(product[field])
                     candidate["metadata"][field] = value
-                    logger.info(f"Added custom field {field}: {value[:100]}...")
-                else:
-                    logger.warning(f"Custom field '{field}' not found in product")
 
             return candidate
         except Exception as e:
@@ -859,22 +949,20 @@ class SearchService:
         max_items: int = 10,
         min_score: float = 0.0,
     ) -> Dict:
-        """Enhanced search with detailed logging"""
+        """Enhanced search with proper BM25 initialization"""
         try:
             logger.info(f"Starting search for query: {query}")
             logger.info(f"Model path: {model_path}")
             logger.info(f"Parameters: max_items={max_items}, min_score={min_score}")
 
             if not query.strip():
-                logger.warning("Empty query received")
                 return {
                     "results": [],
                     "total": 0,
                     "query_info": {"original": query, "error": "Empty query"},
                 }
 
-            # Load model data with logging
-            logger.info("Loading model data...")
+            # Load model data
             model_data = self.load_model(model_path)
             if not model_data:
                 logger.error(f"Failed to load model from {model_path}")
@@ -886,24 +974,39 @@ class SearchService:
             )
 
             # Generate query embedding
-            logger.info("Generating query embedding...")
             model_name = model_data["metadata"]["models"]["embeddings"]
             query_embed = self.embedding_manager.generate_embedding([query], model_name)
             query_embedding = query_embed.reshape(-1)
-            logger.info(f"Query embedding shape: {query_embedding.shape}")
 
-            # Load products with logging
-            logger.info("Loading products data...")
+            # Load products
             products_df = self._load_products(model_path)
             if products_df is None:
-                logger.error("Failed to load products data")
                 raise ValueError("Failed to load products data")
 
             logger.info(f"Loaded products dataframe with shape: {products_df.shape}")
             logger.info(f"Product columns: {list(products_df.columns)}")
 
+            # Initialize hybrid search with product data
+            schema = model_data["metadata"]["schema_mapping"]
+            name_col = schema.get("namecolumn", "name")
+            desc_col = schema.get("descriptioncolumn", "sub_category")
+            cat_col = schema.get("categorycolumn", "main_category")
+
+            # Create search texts
+            search_texts = []
+            for _, row in products_df.iterrows():
+                text_parts = []
+                for col in [name_col, desc_col, cat_col]:
+                    if col in row and pd.notna(row[col]):
+                        text_parts.append(str(row[col]))
+                search_texts.append(" ".join(text_parts))
+
+            # Initialize or update BM25
+            if not self.hybrid_search.bm25 or not self.hybrid_search.tokenized_corpus:
+                logger.info("Initializing BM25 index...")
+                self.hybrid_search.initialize(search_texts)
+
             # Calculate similarities
-            logger.info("Calculating similarities...")
             semantic_scores = np.dot(model_data["embeddings"], query_embedding)
             combined_scores, query_analysis = self.hybrid_search.hybrid_search(
                 query, semantic_scores, context=context
@@ -913,29 +1016,26 @@ class SearchService:
             top_k_idx = np.argsort(combined_scores)[-max_items * 2 :][::-1]
             logger.info(f"Selected top {len(top_k_idx)} candidates for processing")
 
-            # Process candidates with detailed logging
+            # Process candidates
             candidates = []
-            schema = model_data["metadata"]["schema_mapping"]
-            logger.info(f"Using schema mapping: {json.dumps(schema, indent=2)}")
-
             for idx in top_k_idx:
                 score = float(combined_scores[idx])
                 if score < min_score:
-                    logger.debug(f"Skipping candidate {idx} due to low score: {score}")
                     continue
 
-                logger.info(f"Processing candidate at index {idx} with score {score}")
                 product = products_df.iloc[idx]
                 candidate = self._process_candidate(product, schema, score, idx)
                 if candidate:
                     candidates.append(candidate)
-                    logger.info(f"Successfully added candidate {idx}")
-                else:
-                    logger.warning(f"Failed to process candidate {idx}")
+
+            # Rerank if needed
+            if len(candidates) > 1:
+                candidates = self.hybrid_search.rerank(
+                    query, candidates, query_analysis, top_k=max_items
+                )
 
             logger.info(f"Successfully processed {len(candidates)} candidates")
 
-            # Return results
             return {
                 "results": candidates,
                 "total": len(candidates),
