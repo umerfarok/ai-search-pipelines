@@ -1012,7 +1012,7 @@ def initialize_service():
     worker.start()
 
     logger.info("Service initialization completed")
-    return True
+    return True 
 
 
 if __name__ == "__main__":

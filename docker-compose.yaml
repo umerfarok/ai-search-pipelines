@@ -181,7 +181,7 @@ networks:
   app-network:
     driver: bridge
 
-volumes:
+volumes: 
   mongodb_data:
   redis_data:
   localstack_data:

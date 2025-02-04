@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  training-service:
+    build:
+      context: ./trainer
+      dockerfile: Dockerfile.python
+    volumes:
+      - ./cache:/app/cache:rw
+      - ./shared_models:/app/shared_models:rw
+    environment:
+      - TRANSFORMERS_CACHE=/app/cache/transformers
+      - HF_HOME=/app/cache/huggingface
+      - TORCH_HOME=/app/cache/torch
+      - XDG_CACHE_HOME=/app/cache
+      - HF_DATASETS_CACHE=/app/cache/datasets
+      - MODEL_CACHE_DIR=/app/cache/models
+    network_mode: host
+    restart: unless-stopped
+
+  search-service:
+    build:
+      context: ./search
+      dockerfile: Dockerfile.python
+    volumes:
+      - ./cache:/app/cache:rw
+      - ./shared_models:/app/shared_models:rw
+    environment:
+      - TRANSFORMERS_CACHE=/app/cache/transformers
+      - HF_HOME=/app/cache/huggingface
+      - TORCH_HOME=/app/cache/torch
+      - XDG_CACHE_HOME=/app/cache
+      - HF_DATASETS_CACHE=/app/cache/datasets
+      - MODEL_CACHE_DIR=/app/cache/models
+    network_mode: host
+    restart: unless-stopped
+
+# ...other services...

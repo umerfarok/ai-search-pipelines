@@ -7,11 +7,6 @@ RUN mkdir -p /app/cache/{transformers,huggingface,datasets,torch,models} && \
 
 RUN pip3 uninstall numpy -y
 
-# Install dependencies
-COPY requirements.service.txt .
-RUN pip3 install --no-cache-dir -r requirements.service.txt && \
-    python -m spacy validate
-
 WORKDIR /app
 
 # Set cache environment variables
@@ -22,9 +17,10 @@ ENV TRANSFORMERS_CACHE="/app/cache/transformers" \
     HF_DATASETS_CACHE="/app/cache/datasets" \
     MODEL_CACHE_DIR="/app/cache/models"
 
-# Copy application files
+COPY requirements.service.txt . 
+RUN pip3 install --no-cache-dir -r requirements.service.txt
+
 FROM base as prod
 COPY . .
 
 CMD ["python3", "app.py"]
-
