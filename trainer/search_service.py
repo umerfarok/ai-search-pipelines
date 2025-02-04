@@ -980,8 +980,6 @@ def initialize_service():
     logger.info("Initializing search service...")
 
     try:
-        # Setup cache directories
-        AppConfig.setup_cache_dirs()
 
         nltk_data_dir = os.getenv("NLTK_DATA", "/app/cache/nltk_data")
         os.makedirs(nltk_data_dir, exist_ok=True)
