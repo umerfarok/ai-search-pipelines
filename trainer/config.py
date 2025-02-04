@@ -24,7 +24,7 @@ class AppConfig:
     AWS_SECRET_KEY: str = os.getenv("AWS_SECRET_KEY", "test")
     S3_BUCKET: str = os.getenv("S3_BUCKET","local-bucket")
     S3_REGION: str = os.getenv("AWS_REGION", "us-east-1")
-    AWS_SSL_VERIFY: str = os.getenv("AWS_SSL_VERIFY", "true")
+    AWS_SSL_VERIFY: str = os.getenv("AWS_SSL_VERIFY", "false")
     AWS_ENDPOINT_URL: str = os.getenv("AWS_ENDPOINT_URL", "http://localstack:4566")
 
     # Retry Configuration
