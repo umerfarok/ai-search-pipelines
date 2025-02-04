@@ -354,9 +354,27 @@ class HybridSearchEngine:
         context: Optional[Dict] = None,
         alpha: float = 0.7,
     ) -> Tuple[np.ndarray, Dict]:
-        """Enhanced hybrid search with intent-aware scoring"""
+        """Enhanced hybrid search with error handling"""
         try:
+            if self.bm25 is None:
+                raise ValueError("Search engine not initialized")
+
             query_analysis = self.query_understanding.analyze(query, context)
+
+            # Only keep essential query analysis info
+            streamlined_analysis = {
+                "intent": query_analysis.get("intent", {}).get("labels", [])[0],
+                "categories": [
+                    c["category"] for c in query_analysis.get("categories", [])[:2]
+                ],
+                "entities": [
+                    e["text"]
+                    for e in query_analysis.get("semantic_features", {}).get(
+                        "entities", []
+                    )[:3]
+                ],
+            }
+
             tokenized_query = word_tokenize(query.lower())
             bm25_scores = np.array(self.bm25.get_scores(tokenized_query))
 
@@ -367,18 +385,20 @@ class HybridSearchEngine:
             combined_scores = alpha * semantic_scores + (1 - alpha) * bm25_scores
 
             return combined_scores, {
-                "query_understanding": query_analysis,
-                "scores": {
-                    "semantic": semantic_scores.mean(),
-                    "lexical": bm25_scores.mean(),
-                    "combined": combined_scores.mean(),
+                "query_understanding": streamlined_analysis,
+                "weights": {
+                    "semantic": round(alpha, 2),
+                    "lexical": round(1 - alpha, 2),
                 },
-                "weights": {"semantic": alpha, "lexical": 1 - alpha},
             }
 
         except Exception as e:
             logger.error(f"Hybrid search failed: {e}")
-            return semantic_scores, {"error": str(e)}
+            # Return semantic scores as fallback with error info
+            return semantic_scores, {
+                "error": str(e),
+                "fallback": "using semantic search only",
+            }
 
     def _adjust_weights(self, query_analysis: Dict) -> float:
         """Dynamically adjust weights based on query analysis"""
@@ -867,39 +887,75 @@ search_service = SearchService()
 
 @app.route("/search", methods=["POST"])
 def search():
-    """Enhanced search endpoint with improved error handling"""
+    """Enhanced search endpoint with streamlined response"""
     try:
         data = request.get_json()
         if not data:
             return jsonify({"error": "Missing request data"}), 400
 
-        if "query" not in data:
-            return jsonify({"error": "Missing required field: query"}), 400
-
-        if "model_path" not in data:
-            return jsonify({"error": "Missing required field: model_path"}), 400
-
-        try:
-            results = search_service.search(
-                query=data["query"],
-                model_path=data["model_path"],
-                context=data.get("context"),
-                max_items=data.get("max_items", 10),
-                min_score=data.get("min_score", 0.4),
+        required_fields = ["query", "model_path"]
+        missing_fields = [field for field in required_fields if field not in data]
+        if missing_fields:
+            return (
+                jsonify(
+                    {"error": f"Missing required fields: {', '.join(missing_fields)}"}
+                ),
+                400,
             )
-        except ValueError as ve:
-            return jsonify({"error": str(ve)}), 400
-        except Exception as e:
-            logger.error(f"Search processing error: {str(e)}")
-            return jsonify({"error": "Search processing failed"}), 500
 
-        return jsonify(results)
+        results = search_service.search(
+            query=data["query"],
+            model_path=data["model_path"],
+            context=data.get("context"),
+            max_items=data.get("max_items", 10),
+            min_score=data.get("min_score", 0.4),
+        )
 
-    except json.JSONDecodeError:
-        return jsonify({"error": "Invalid JSON in request"}), 400
+        if "error" in results:
+            return jsonify({"error": results["error"], "query": data["query"]}), 400
+
+        # Streamline the response
+        streamlined_results = {
+            "results": [
+                {
+                    "id": item["id"],
+                    "name": item["name"],
+                    "category": item["category"],
+                    "score": round(item["score"], 3),
+                    "relevance": {
+                        "intent_match": bool(item.get("intent_matches", {})),
+                        "category_match": bool(
+                            item.get("ranking_factors", {}).get("category_matches")
+                        ),
+                    },
+                }
+                for item in results.get("results", [])
+            ],
+            "metadata": {
+                "total_results": results.get("total", 0),
+                "query": results["query_info"]["original"],
+                "primary_intent": results["query_info"]["analysis"][
+                    "query_understanding"
+                ]["intent"],
+                "top_categories": results["query_info"]["analysis"][
+                    "query_understanding"
+                ]["categories"],
+            },
+        }
+
+        return jsonify(streamlined_results)
+
     except Exception as e:
         logger.error(f"Search endpoint error: {str(e)}")
-        return jsonify({"error": "Internal server error"}), 500
+        return (
+            jsonify(
+                {
+                    "error": "Internal server error",
+                    "query": data.get("query", "unknown"),
+                }
+            ),
+            500,
+        )
 
 
 @app.route("/health")
