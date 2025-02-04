@@ -8,7 +8,7 @@ RUN mkdir -p /app/cache/{transformers,huggingface,datasets,torch,models} && \
 RUN pip3 uninstall numpy -y
 
 # Install dependencies
-COPY requirements.service.txt .
+COPY . .
 RUN pip3 install --no-cache-dir -r requirements.service.txt && \
     python -m spacy validate
 
