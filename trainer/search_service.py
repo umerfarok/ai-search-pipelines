@@ -82,15 +82,24 @@ class DynamicQueryUnderstanding:
         return categories
 
     def _expand_query(self, query: str) -> List[str]:
-        """Intent-aware query expansion"""
-        intent = self.analyze(query).get("intent", {}).get("labels", [""])[0]
+        """Intent-aware query expansion without recursive analyze call"""
+        # Get intent directly without full analysis
+        intent_results = self.zero_shot(
+            query,
+            candidate_labels=["search", "compare", "explore", "purchase", "learn"],
+            multi_label=True,
+        )
+        primary_intent = (
+            intent_results["labels"][0] if intent_results["labels"] else "search"
+        )
+
         prompt = {
             "search": f"Expand this product search query with specific attributes: {query}",
             "compare": f"Generate comparison terms for: {query}",
             "explore": f"Suggest related categories for: {query}",
             "purchase": f"Generate purchase-related terms for: {query}",
             "learn": f"Expand this informational query with technical terms: {query}",
-        }.get(intent, f"Generate relevant search terms for: {query}")
+        }.get(primary_intent, f"Generate relevant search terms for: {query}")
 
         try:
             expanded = self.query_expansion_model(
@@ -106,9 +115,21 @@ class DynamicQueryUnderstanding:
             return [query]
 
     def _get_sentiment(self, text: str) -> float:
-        """Analyze text sentiment using spaCy"""
-        doc = self.nlp(text)
-        return doc.sentiment
+        """Analyze text sentiment with explicit model"""
+        if not hasattr(self, "sentiment_analyzer"):
+            self.sentiment_analyzer = pipeline(
+                "sentiment-analysis",
+                model="distilbert/distilbert-base-uncased-finetuned-sst-2-english",
+                device=self.device,
+            )
+        try:
+            result = self.sentiment_analyzer(text[:512])[0]  # Truncate to max length
+            return (
+                result["score"] if result["label"] == "POSITIVE" else -result["score"]
+            )
+        except Exception as e:
+            logger.error(f"Sentiment analysis failed: {e}")
+            return 0.0
 
     def _extract_semantic_features(self, text: str) -> Dict[str, Any]:
         """Extract semantic features from text"""
@@ -125,11 +146,13 @@ class DynamicQueryUnderstanding:
         }
 
     def analyze(self, query: str, context: Optional[Dict] = None) -> Dict:
-        """Comprehensive query analysis with cleaned response"""
+        """Comprehensive query analysis without recursion"""
         try:
             categories = self._get_dynamic_categories(query)
-            expanded_terms = self._expand_query(query)
+            expanded_terms = self._expand_query(query)  # Now uses direct intent check
             semantic_features = self._extract_semantic_features(query)
+
+            # Get intent results once
             intent_labels = ["search", "compare", "explore", "purchase", "learn"]
             intent_results = self.zero_shot(
                 query, candidate_labels=intent_labels, multi_label=True
@@ -387,6 +410,7 @@ class HybridSearchEngine:
         if primary_intent in ["learn", "compare"]:
             base_alpha = max(base_alpha, 0.6)
         return max(0.3, min(0.9, base_alpha))
+
     def rerank(
         self, query: str, candidates: List[Dict], query_analysis: Dict, top_k: int = 10
     ) -> List[Dict]:
@@ -758,8 +782,13 @@ class SearchService:
 
     def _score_explore_features(self, candidate: Dict) -> float:
         """Score product for explorative features"""
-        return len([cat for cat in self.current_query_analysis.get("categories", []) 
-                if cat["category"].lower() in candidate["text"].lower()])
+        return len(
+            [
+                cat
+                for cat in self.current_query_analysis.get("categories", [])
+                if cat["category"].lower() in candidate["text"].lower()
+            ]
+        )
 
     def search(
         self,
