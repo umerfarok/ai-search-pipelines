@@ -128,7 +128,7 @@ class DynamicQueryUnderstanding:
         return features
 
     def analyze(self, query: str, context: Optional[Dict] = None) -> Dict:
-        """Comprehensive query analysis with dynamic understanding"""
+        """Comprehensive query analysis with cleaned response"""
         try:
             # Get dynamic categories
             categories = self._get_dynamic_categories(query)
@@ -145,7 +145,7 @@ class DynamicQueryUnderstanding:
                 query, candidate_labels=intent_labels, multi_label=True
             )
 
-            # Build query understanding
+            # Build query understanding without query_vector
             understanding = {
                 "original_query": query,
                 "categories": categories,
@@ -155,9 +155,6 @@ class DynamicQueryUnderstanding:
                     "labels": intent_results["labels"],
                     "scores": [float(score) for score in intent_results["scores"]],
                 },
-                "query_vector": self.feature_extractor(query, return_tensors=True)[0]
-                .mean(axis=0)
-                .tolist(),
             }
 
             # Add context if provided
@@ -333,71 +330,27 @@ class HybridSearchEngine:
         context: Optional[Dict] = None,
         alpha: float = 0.7,
     ) -> Tuple[np.ndarray, Dict]:
-        """Enhanced hybrid search with better error handling"""
+        """Enhanced hybrid search with cleaned response"""
         try:
             if not query.strip():
                 return semantic_scores, {
                     "error": "Empty query",
-                    "scores": {
-                        "semantic": (
-                            semantic_scores.tolist()
-                            if semantic_scores is not None
-                            else []
-                        ),
-                        "lexical": [],
-                        "combined": (
-                            semantic_scores.tolist()
-                            if semantic_scores is not None
-                            else []
-                        ),
-                    },
-                }
-
-            # Initialize BM25 if not already initialized
-            if self.bm25 is None or self.tokenized_corpus is None:
-                logger.error("BM25 not initialized properly")
-                return semantic_scores, {
-                    "error": "Search index not initialized",
-                    "scores": {
-                        "semantic": (
-                            semantic_scores.tolist()
-                            if semantic_scores is not None
-                            else []
-                        ),
-                        "lexical": [],
-                        "combined": (
-                            semantic_scores.tolist()
-                            if semantic_scores is not None
-                            else []
-                        ),
-                    },
+                    "scores": {"semantic": None, "lexical": None, "combined": None},
                 }
 
             # Get query understanding
-            try:
-                query_analysis = self.query_understanding.analyze(query, context)
-            except Exception as e:
-                logger.error(f"Query analysis failed: {e}")
-                query_analysis = {"error": str(e)}
+            query_analysis = self.query_understanding.analyze(query, context)
 
             # Get BM25 scores
-            try:
-                tokenized_query = word_tokenize(query.lower())
-                bm25_scores = np.array(self.bm25.get_scores(tokenized_query))
-            except Exception as e:
-                logger.error(f"BM25 scoring failed: {e}")
-                bm25_scores = np.zeros_like(semantic_scores)
+            tokenized_query = word_tokenize(query.lower())
+            bm25_scores = np.array(self.bm25.get_scores(tokenized_query))
 
             # Normalize scores
             bm25_scores = self._normalize_scores(bm25_scores)
             semantic_scores = self._normalize_scores(semantic_scores)
 
             # Adjust weights based on query understanding
-            try:
-                alpha = self._adjust_weights(query_analysis)
-            except Exception as e:
-                logger.error(f"Weight adjustment failed: {e}")
-                # Fall back to default alpha
+            alpha = self._adjust_weights(query_analysis)
 
             # Combine scores
             combined_scores = alpha * semantic_scores + (1 - alpha) * bm25_scores
@@ -405,27 +358,18 @@ class HybridSearchEngine:
             return combined_scores, {
                 "query_understanding": query_analysis,
                 "scores": {
-                    "semantic": semantic_scores.tolist(),
-                    "lexical": bm25_scores.tolist(),
-                    "combined": combined_scores.tolist(),
+                    "semantic": semantic_scores.mean(),  # Just return average score
+                    "lexical": bm25_scores.mean(),  # Just return average score
+                    "combined": combined_scores.mean(),  # Just return average score
                 },
                 "weights": {"semantic": alpha, "lexical": 1 - alpha},
             }
 
         except Exception as e:
             logger.error(f"Hybrid search failed: {e}")
-            # Return semantic scores as fallback with error info
             return semantic_scores, {
                 "error": str(e),
-                "scores": {
-                    "semantic": (
-                        semantic_scores.tolist() if semantic_scores is not None else []
-                    ),
-                    "lexical": [],
-                    "combined": (
-                        semantic_scores.tolist() if semantic_scores is not None else []
-                    ),
-                },
+                "scores": {"semantic": None, "lexical": None, "combined": None},
             }
 
     def _normalize_scores(self, scores: np.ndarray) -> np.ndarray:
@@ -609,7 +553,7 @@ class HybridSearchEngine:
             return 1.0
 
     def _get_ranking_factors(self, candidate: Dict, query_analysis: Dict) -> Dict:
-        """Extract factors that influenced the ranking"""
+        """Extract factors that influenced the ranking with better error handling"""
         try:
             factors = {
                 "category_matches": [],
@@ -619,36 +563,44 @@ class HybridSearchEngine:
                 "context_influences": [],
             }
 
-            # Category matches
-            for category in query_analysis.get("categories", []):
-                if category["category"].lower() in candidate["text"].lower():
-                    factors["category_matches"].append(
-                        {
-                            "category": category["category"],
-                            "confidence": category["confidence"],
-                        }
-                    )
+            # Category matches - with null check
+            categories = query_analysis.get("categories", []) or []
+            for category in categories:
+                if isinstance(category, dict) and "category" in category:
+                    if category["category"].lower() in candidate["text"].lower():
+                        factors["category_matches"].append(
+                            {
+                                "category": category["category"],
+                                "confidence": category.get("confidence", 0.0),
+                            }
+                        )
 
-            # Entity matches
-            if "semantic_features" in query_analysis:
-                for entity in query_analysis["semantic_features"].get("entities", []):
-                    if entity["text"].lower() in candidate["text"].lower():
-                        factors["entity_matches"].append(entity)
+            # Entity matches - with null check and type validation
+            semantic_features = query_analysis.get("semantic_features", {}) or {}
+            if isinstance(semantic_features, dict):
+                entities = semantic_features.get("entities", []) or []
+                for entity in entities:
+                    if isinstance(entity, dict) and "text" in entity:
+                        if entity["text"].lower() in candidate["text"].lower():
+                            factors["entity_matches"].append(entity)
 
-            # Phrase matches
-            for phrase in query_analysis["semantic_features"].get("key_phrases", []):
-                if phrase.lower() in candidate["text"].lower():
-                    factors["key_phrase_matches"].append(phrase)
+                # Phrase matches - with null check
+                key_phrases = semantic_features.get("key_phrases", []) or []
+                for phrase in key_phrases:
+                    if phrase and isinstance(phrase, str):
+                        if phrase.lower() in candidate["text"].lower():
+                            factors["key_phrase_matches"].append(phrase)
 
-            # Expanded term matches
-            for term in query_analysis.get("expanded_terms", []):
-                if term.lower() in candidate["text"].lower():
-                    factors["expanded_term_matches"].append(term)
+            # Expanded term matches - with null check
+            expanded_terms = query_analysis.get("expanded_terms", []) or []
+            for term in expanded_terms:
+                if term and isinstance(term, str):
+                    if term.lower() in candidate["text"].lower():
+                        factors["expanded_term_matches"].append(term)
 
-            # Context influences
-            if "context" in query_analysis:
-                context = query_analysis["context"]
-
+            # Context influences - with null check
+            context = query_analysis.get("context", {}) or {}
+            if isinstance(context, dict):
                 if "query_evolution" in context:
                     factors["context_influences"].append(
                         {"type": "query_evolution", "info": context["query_evolution"]}
@@ -666,7 +618,13 @@ class HybridSearchEngine:
 
         except Exception as e:
             logger.error(f"Ranking factor extraction failed: {e}")
-            return {}
+            return {
+                "category_matches": [],
+                "entity_matches": [],
+                "key_phrase_matches": [],
+                "expanded_term_matches": [],
+                "context_influences": [],
+            }
 
 
 class S3Manager:
