@@ -11,10 +11,10 @@ services:
       PYTHONUNBUFFERED: 1
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      AWS_ACCESS_KEY: ${AWS_ACCESS_KEY} 
-      AWS_SECRET_KEY: ${AWS_SECRET_KEY}
-      S3_BUCKET: ${S3_BUCKET}
-      AWS_REGION: ${AWS_REGION}
+      AWS_ACCESS_KEY: test
+      AWS_SECRET_KEY: test
+      S3_BUCKET: local-bucket
+      AWS_REGION: us-east-1
       AWS_ENDPOINT_URL: http://localstack:4566
       MONGO_URI: mongodb://root:example@mongo:27017
       SEARCH_SERVICE_HOST: http://search-service:5001
@@ -45,9 +45,11 @@ services:
       # Model storage
       MODEL_STORAGE_DIR: /app/models
       # AWS configuration
-      AWS_ACCESS_KEY: ${AWS_ACCESS_KEY}
-      AWS_SECRET_KEY: ${AWS_SECRET_KEY}
-      S3_BUCKET: ${S3_BUCKET}
+      AWS_ACCESS_KEY: test
+      AWS_SECRET_KEY: test
+      S3_BUCKET: local-bucket
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://localstack:4566
       # GPU configuration
       NVIDIA_VISIBLE_DEVICES: all
       NLTK_DATA: /app/cache/nltk_data
@@ -91,6 +93,11 @@ services:
       # Training-specific settings
       TRAINING_QUEUE: training_queue
       MODEL_PREFIX: model_status
+      AWS_ACCESS_KEY: test
+      AWS_SECRET_KEY: test
+      S3_BUCKET: local-bucket
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://localstack:4566
     ports:
       - "5000:5000"
     command: ["python", "training_service.py"]

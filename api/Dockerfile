@@ -15,7 +15,7 @@ RUN export AWS_ACCESS_KEY_ID=fakeAccessKey
 RUN export AWS_SECRET_ACCESS_KEY=fakeSecretKey
 RUN export AWS_SESSION_TOKEN=fakeSessionToken
 RUN export AWS_REGION=us-east-1
-RUN export AWS_ENDPOINT_URL=http://localhost:4566
+RUN export AWS_ENDPOINT_URL=http://localstack:4566
 
 # Copy source code
 COPY . .
