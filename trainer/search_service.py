@@ -120,11 +120,13 @@ class DynamicQueryUnderstanding:
             self.sentiment_analyzer = pipeline(
                 "sentiment-analysis",
                 model="distilbert/distilbert-base-uncased-finetuned-sst-2-english",
-                device=self.device
+                device=self.device,
             )
         try:
             result = self.sentiment_analyzer(text[:512])[0]  # Truncate to max length
-            return result["score"] if result["label"] == "POSITIVE" else -result["score"]
+            return (
+                result["score"] if result["label"] == "POSITIVE" else -result["score"]
+            )
         except Exception as e:
             logger.error(f"Sentiment analysis failed: {e}")
             return 0.0
@@ -154,14 +156,28 @@ class DynamicQueryUnderstanding:
                 query, candidate_labels=intent_labels, multi_label=True
             )
 
+            # Round scores for better readability
             understanding = {
                 "original_query": query,
-                "categories": categories,
+                "categories": [
+                    {
+                        "category": cat["category"],
+                        "confidence": round(float(cat["confidence"]), 4),
+                    }
+                    for cat in categories
+                ],
                 "expanded_terms": expanded_terms,
-                "semantic_features": semantic_features,
+                "semantic_features": {
+                    "entities": semantic_features.get("entities", []),
+                    "key_phrases": semantic_features.get("key_phrases", []),
+                    "sentiment": round(float(semantic_features.get("sentiment", 0)), 4),
+                    "dependencies": semantic_features.get("dependencies", []),
+                },
                 "intent": {
                     "labels": intent_results["labels"],
-                    "scores": [float(score) for score in intent_results["scores"]],
+                    "scores": [
+                        round(float(score), 4) for score in intent_results["scores"]
+                    ],
                 },
             }
 
@@ -336,8 +352,17 @@ class HybridSearchEngine:
                     logger.warning(f"Error tokenizing document: {e}")
                     self.tokenized_corpus.append([])
 
-            self.bm25 = BM25Okapi(self.tokenized_corpus)
-            return True
+            # Ensure at least one valid tokenized document exists
+            if any(self.tokenized_corpus):
+                self.bm25 = BM25Okapi(self.tokenized_corpus)
+                return True
+            else:
+                logger.error("No valid tokenized documents found")
+                return False
+
+        except Exception as e:
+            logger.error(f"Search engine initialization failed: {e}")
+            return False
 
         except Exception as e:
             logger.error(f"Search engine initialization failed: {e}")
@@ -352,6 +377,10 @@ class HybridSearchEngine:
     ) -> Tuple[np.ndarray, Dict]:
         """Enhanced hybrid search with intent-aware scoring"""
         try:
+            # Ensure BM25 is initialized
+            if self.bm25 is None:
+                raise ValueError("BM25 not initialized. Call initialize() first.")
+
             query_analysis = self.query_understanding.analyze(query, context)
             tokenized_query = word_tokenize(query.lower())
             bm25_scores = np.array(self.bm25.get_scores(tokenized_query))
@@ -365,11 +394,14 @@ class HybridSearchEngine:
             return combined_scores, {
                 "query_understanding": query_analysis,
                 "scores": {
-                    "semantic": semantic_scores.mean(),
-                    "lexical": bm25_scores.mean(),
-                    "combined": combined_scores.mean(),
+                    "semantic": round(float(semantic_scores.mean()), 4),
+                    "lexical": round(float(bm25_scores.mean()), 4),
+                    "combined": round(float(combined_scores.mean()), 4),
                 },
-                "weights": {"semantic": alpha, "lexical": 1 - alpha},
+                "weights": {
+                    "semantic": round(float(alpha), 4),
+                    "lexical": round(float(1 - alpha), 4),
+                },
             }
 
         except Exception as e:
@@ -805,14 +837,19 @@ class SearchService:
             if products_df is None:
                 raise ValueError("Failed to load products data")
 
+            # Initialize BM25 with product descriptions
+            descriptions = products_df[
+                model_data["metadata"]["schema_mapping"].get(
+                    "descriptioncolumn", "name"
+                )
+            ].tolist()
+            if not self.hybrid_search.initialize(descriptions):
+                raise ValueError("Failed to initialize BM25")
+
             # Generate embeddings and scores
             model_name = model_data["metadata"]["models"]["embeddings"]
             query_embed = self.embedding_manager.generate_embedding([query], model_name)
             semantic_scores = np.dot(model_data["embeddings"], query_embed.reshape(-1))
-
-            # Initialize search context
-            context = context or {}
-            context.setdefault("previous_queries", []).append(query)
 
             # Perform hybrid search
             combined_scores, query_analysis = self.hybrid_search.hybrid_search(
