@@ -120,13 +120,11 @@ class DynamicQueryUnderstanding:
             self.sentiment_analyzer = pipeline(
                 "sentiment-analysis",
                 model="distilbert/distilbert-base-uncased-finetuned-sst-2-english",
-                device=self.device,
+                device=self.device
             )
         try:
             result = self.sentiment_analyzer(text[:512])[0]  # Truncate to max length
-            return (
-                result["score"] if result["label"] == "POSITIVE" else -result["score"]
-            )
+            return result["score"] if result["label"] == "POSITIVE" else -result["score"]
         except Exception as e:
             logger.error(f"Sentiment analysis failed: {e}")
             return 0.0
@@ -323,39 +321,26 @@ class HybridSearchEngine:
     def initialize(self, texts: List[str]) -> bool:
         """Initialize search engine with corpus"""
         try:
-            if not texts or not isinstance(texts, list):
-                logger.error("Invalid text corpus provided")
+            if not texts:
+                logger.error("Empty text corpus")
                 return False
 
             self.tokenized_corpus = []
-            valid_docs = 0
-
             for text in texts:
                 try:
-                    if not isinstance(text, str):
-                        self.tokenized_corpus.append([])
-                        continue
-
-                    tokenized = word_tokenize(text.lower())
-                    if tokenized:
-                        valid_docs += 1
-                        self.tokenized_corpus.append(tokenized)
-                    else:
-                        self.tokenized_corpus.append([])
+                    tokenized = (
+                        word_tokenize(text.lower()) if isinstance(text, str) else []
+                    )
+                    self.tokenized_corpus.append(tokenized)
                 except Exception as e:
                     logger.warning(f"Error tokenizing document: {e}")
                     self.tokenized_corpus.append([])
-
-            if valid_docs == 0:
-                logger.error("No valid documents in corpus")
-                return False
 
             self.bm25 = BM25Okapi(self.tokenized_corpus)
             return True
 
         except Exception as e:
             logger.error(f"Search engine initialization failed: {e}")
-            self.bm25 = None
             return False
 
     def hybrid_search(
@@ -365,27 +350,9 @@ class HybridSearchEngine:
         context: Optional[Dict] = None,
         alpha: float = 0.7,
     ) -> Tuple[np.ndarray, Dict]:
-        """Enhanced hybrid search with error handling"""
+        """Enhanced hybrid search with intent-aware scoring"""
         try:
-            if self.bm25 is None:
-                raise ValueError("Search engine not initialized")
-
             query_analysis = self.query_understanding.analyze(query, context)
-
-            # Only keep essential query analysis info
-            streamlined_analysis = {
-                "intent": query_analysis.get("intent", {}).get("labels", [])[0],
-                "categories": [
-                    c["category"] for c in query_analysis.get("categories", [])[:2]
-                ],
-                "entities": [
-                    e["text"]
-                    for e in query_analysis.get("semantic_features", {}).get(
-                        "entities", []
-                    )[:3]
-                ],
-            }
-
             tokenized_query = word_tokenize(query.lower())
             bm25_scores = np.array(self.bm25.get_scores(tokenized_query))
 
@@ -396,20 +363,18 @@ class HybridSearchEngine:
             combined_scores = alpha * semantic_scores + (1 - alpha) * bm25_scores
 
             return combined_scores, {
-                "query_understanding": streamlined_analysis,
-                "weights": {
-                    "semantic": round(alpha, 2),
-                    "lexical": round(1 - alpha, 2),
+                "query_understanding": query_analysis,
+                "scores": {
+                    "semantic": semantic_scores.mean(),
+                    "lexical": bm25_scores.mean(),
+                    "combined": combined_scores.mean(),
                 },
+                "weights": {"semantic": alpha, "lexical": 1 - alpha},
             }
 
         except Exception as e:
             logger.error(f"Hybrid search failed: {e}")
-            # Return semantic scores as fallback with error info
-            return semantic_scores, {
-                "error": str(e),
-                "fallback": "using semantic search only",
-            }
+            return semantic_scores, {"error": str(e)}
 
     def _adjust_weights(self, query_analysis: Dict) -> float:
         """Dynamically adjust weights based on query analysis"""
@@ -829,39 +794,19 @@ class SearchService:
         max_items: int = 10,
         min_score: float = 0.4,
     ) -> Dict:
-        """Enhanced intent-aware search with improved error handling"""
+        """Enhanced intent-aware search"""
         try:
             # Load model and data
             model_data = self.load_model(model_path)
             if not model_data:
-                return {"error": f"Failed to load model from {model_path}"}
+                raise ValueError(f"Failed to load model from {model_path}")
 
             products_df = self._load_products(model_path)
-            if products_df is None or products_df.empty:
-                return {"error": "Failed to load products data"}
-
-            # Initialize search engine if needed
-            texts = (
-                products_df[
-                    model_data["metadata"]["schema_mapping"].get(
-                        "descriptioncolumn", "description"
-                    )
-                ]
-                .astype(str)
-                .tolist()
-            )
-            if not self.hybrid_search.initialize(texts):
-                logger.warning(
-                    "Failed to initialize BM25, falling back to semantic search only"
-                )
+            if products_df is None:
+                raise ValueError("Failed to load products data")
 
             # Generate embeddings and scores
-            model_name = model_data["metadata"]["models"].get("embeddings")
-            if not model_name:
-                return {
-                    "error": "Invalid model configuration - missing embeddings model"
-                }
-
+            model_name = model_data["metadata"]["models"]["embeddings"]
             query_embed = self.embedding_manager.generate_embedding([query], model_name)
             semantic_scores = np.dot(model_data["embeddings"], query_embed.reshape(-1))
 
@@ -869,182 +814,51 @@ class SearchService:
             context = context or {}
             context.setdefault("previous_queries", []).append(query)
 
-            try:
-                # Perform hybrid search with fallback
-                combined_scores, search_analysis = self.hybrid_search.hybrid_search(
-                    query, semantic_scores, context=context
-                )
-            except Exception as e:
-                logger.warning(f"Hybrid search failed, using semantic scores: {str(e)}")
-                combined_scores = semantic_scores
-                search_analysis = {"error": str(e), "fallback": "semantic_only"}
+            # Perform hybrid search
+            combined_scores, query_analysis = self.hybrid_search.hybrid_search(
+                query, semantic_scores, context=context
+            )
+            self.current_query_analysis = query_analysis
 
-            # Process results
+            # Get and process candidates
             top_k_idx = np.argsort(combined_scores)[-max_items * 2 :][::-1]
             candidates = []
-
             for idx in top_k_idx:
                 score = float(combined_scores[idx])
                 if score >= min_score:
-                    try:
-                        candidate = self._process_candidate(
-                            products_df.iloc[idx],
-                            model_data["metadata"]["schema_mapping"],
-                            score,
-                            idx,
-                        )
-                        if candidate:
-                            candidates.append(candidate)
-                    except Exception as e:
-                        logger.warning(f"Failed to process candidate {idx}: {str(e)}")
-                        continue
+                    candidate = self._process_candidate(
+                        products_df.iloc[idx],
+                        model_data["metadata"]["schema_mapping"],
+                        score,
+                        idx,
+                    )
+                    if candidate:
+                        candidates.append(candidate)
 
-            # Prepare streamlined response
-            results = {
-                "results": [
-                    {
-                        "id": item.get("id", ""),
-                        "name": item.get("name", ""),
-                        "category": item.get("category", ""),
-                        "score": round(float(item.get("score", 0)), 3),
-                        "metadata": {
-                            "intent_match": bool(item.get("intent_matches")),
-                            "category_match": bool(
-                                item.get("ranking_factors", {}).get("category_matches")
-                            ),
-                        },
-                    }
-                    for item in candidates[:max_items]
-                ],
-                "metadata": {
-                    "total_results": len(candidates),
-                    "query": query,
-                    "search_type": (
-                        "hybrid"
-                        if "fallback" not in search_analysis
-                        else "semantic_only"
-                    ),
+            # Rerank results
+            reranked = self.hybrid_search.rerank(
+                query, candidates, query_analysis, max_items
+            )
+
+            return {
+                "results": reranked[:max_items],
+                "total": len(reranked),
+                "query_info": {
+                    "original": query,
+                    "analysis": query_analysis,
+                    "context": context,
+                    "model": {"name": model_name, "path": model_path},
                 },
             }
 
-            # Add query understanding if available
-            if (
-                isinstance(search_analysis, dict)
-                and "query_understanding" in search_analysis
-            ):
-                understanding = search_analysis["query_understanding"]
-                results["metadata"]["intent"] = understanding.get("intent", "unknown")
-                results["metadata"]["categories"] = understanding.get("categories", [])
-
-            return results
-
         except Exception as e:
             logger.error(f"Search error: {str(e)}")
-            return {
-                "error": str(e),
-                "query": query,
-                "results": [],
-                "metadata": {"total_results": 0, "search_type": "failed"},
-            }
+            return {"error": str(e)}
 
 
 # Initialize service
 
 search_service = SearchService()
-
-
-# Update the HybridSearchEngine class initialize method
-class HybridSearchEngine:
-    def initialize(self, texts: List[str]) -> bool:
-        """Initialize search engine with corpus"""
-        try:
-            if not texts or not isinstance(texts, list):
-                logger.error("Invalid text corpus provided")
-                return False
-
-            self.tokenized_corpus = []
-            valid_docs = 0
-
-            for text in texts:
-                try:
-                    if not isinstance(text, str):
-                        self.tokenized_corpus.append([])
-                        continue
-
-                    tokenized = word_tokenize(text.lower())
-                    if tokenized:
-                        valid_docs += 1
-                        self.tokenized_corpus.append(tokenized)
-                    else:
-                        self.tokenized_corpus.append([])
-                except Exception as e:
-                    logger.warning(f"Error tokenizing document: {e}")
-                    self.tokenized_corpus.append([])
-
-            if valid_docs == 0:
-                logger.error("No valid documents in corpus")
-                return False
-
-            self.bm25 = BM25Okapi(self.tokenized_corpus)
-            return True
-
-        except Exception as e:
-            logger.error(f"Search engine initialization failed: {e}")
-            self.bm25 = None
-            return False
-
-    def hybrid_search(
-        self,
-        query: str,
-        semantic_scores: np.ndarray,
-        context: Optional[Dict] = None,
-        alpha: float = 0.7,
-    ) -> Tuple[np.ndarray, Dict]:
-        """Enhanced hybrid search with error handling"""
-        try:
-            if self.bm25 is None:
-                raise ValueError("Search engine not initialized")
-
-            query_analysis = self.query_understanding.analyze(query, context)
-
-            # Only keep essential query analysis info
-            streamlined_analysis = {
-                "intent": query_analysis.get("intent", {}).get("labels", [])[0],
-                "categories": [
-                    c["category"] for c in query_analysis.get("categories", [])[:2]
-                ],
-                "entities": [
-                    e["text"]
-                    for e in query_analysis.get("semantic_features", {}).get(
-                        "entities", []
-                    )[:3]
-                ],
-            }
-
-            tokenized_query = word_tokenize(query.lower())
-            bm25_scores = np.array(self.bm25.get_scores(tokenized_query))
-
-            bm25_scores = self._normalize_scores(bm25_scores)
-            semantic_scores = self._normalize_scores(semantic_scores)
-
-            alpha = self._adjust_weights(query_analysis)
-            combined_scores = alpha * semantic_scores + (1 - alpha) * bm25_scores
-
-            return combined_scores, {
-                "query_understanding": streamlined_analysis,
-                "weights": {
-                    "semantic": round(alpha, 2),
-                    "lexical": round(1 - alpha, 2),
-                },
-            }
-
-        except Exception as e:
-            logger.error(f"Hybrid search failed: {e}")
-            # Return semantic scores as fallback with error info
-            return semantic_scores, {
-                "error": str(e),
-                "fallback": "using semantic search only",
-            }
 
 
 @app.route("/search", methods=["POST"])
@@ -1055,43 +869,34 @@ def search():
         if not data:
             return jsonify({"error": "Missing request data"}), 400
 
-        required_fields = ["query", "model_path"]
-        missing_fields = [field for field in required_fields if field not in data]
-        if missing_fields:
-            return jsonify({"error": f"Missing required fields: {', '.join(missing_fields)}"}), 400
+        if "query" not in data:
+            return jsonify({"error": "Missing required field: query"}), 400
 
-        results = search_service.search(
-            query=data["query"],
-            model_path=data["model_path"],
-            context=data.get("context"),
-            max_items=data.get("max_items", 10),
-            min_score=data.get("min_score", 0.4),
-        )
+        if "model_path" not in data:
+            return jsonify({"error": "Missing required field: model_path"}), 400
 
-        if "error" in results:
-            return jsonify({
-                "error": results["error"],
-                "query": data["query"],
-                "results": [],
-                "metadata": {
-                    "total_results": 0,
-                    "search_type": "failed"
-                }
-            }), 400
+        try:
+            results = search_service.search(
+                query=data["query"],
+                model_path=data["model_path"],
+                context=data.get("context"),
+                max_items=data.get("max_items", 10),
+                min_score=data.get("min_score", 0.4),
+            )
+        except ValueError as ve:
+            return jsonify({"error": str(ve)}), 400
+        except Exception as e:
+            logger.error(f"Search processing error: {str(e)}")
+            return jsonify({"error": "Search processing failed"}), 500
 
         return jsonify(results)
 
+    except json.JSONDecodeError:
+        return jsonify({"error": "Invalid JSON in request"}), 400
     except Exception as e:
         logger.error(f"Search endpoint error: {str(e)}")
-        return jsonify({
-            "error": "Internal server error",
-            "query": data.get("query", "unknown"),
-            "results": [],
-            "metadata": {
-                "total_results": 0,
-                "search_type": "failed"
-            }
-        }), 500
+        return jsonify({"error": "Internal server error"}), 500
+
 
 @app.route("/health")
 def health():
