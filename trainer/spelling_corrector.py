@@ -27,7 +27,7 @@ class SpellingCorrector:
                 self.sym_spell.create_dictionary_entry(word, 1)
                 
         except Exception as e:
-            logger.error(f"Failed to initialize spelling corrector: {e}")
+            print(f"Failed to initialize spelling corrector: {e}")
             
     def _tokenize_query(self, query: str) -> List[str]:
         """Tokenize query into words"""
