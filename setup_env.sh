@@ -76,5 +76,14 @@ EOF
 # Restart Docker to apply the changes
 sudo systemctl restart docker
 
+########################################
+# 4. Final Verification
+########################################
+echo ""
+echo "========================================"
+echo "Verifying NVIDIA GPU support in Docker..."
+echo "========================================"
+docker run --rm --gpus all nvidia/cuda:12.2.0-base nvidia-smi
+
 echo ""
 echo "Setup complete!"
