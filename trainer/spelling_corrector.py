@@ -3,31 +3,62 @@ from collections import Counter
 import re
 from nltk.corpus import words
 from symspellpy import SymSpell, Verbosity
+import nltk
+import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 class SpellingCorrector:
     """Handles spelling correction using multiple approaches"""
     
     def __init__(self):
         self.sym_spell = SymSpell(max_dictionary_edit_distance=2)
-        self.word_set = set(words.words())
+        self.word_set = set()
         self.custom_vocab = set()
         self.min_word_length = 3
         
     def initialize(self, custom_vocabulary: List[str] = None):
         """Initialize spelling corrector with custom vocabulary"""
         try:
-            # Download required NLTK data if not already present
+            # Ensure NLTK data directory exists
+            nltk_data_dir = os.getenv('NLTK_DATA', '/app/cache/nltk_data')
+            os.makedirs(nltk_data_dir, exist_ok=True)
             
+            # Set NLTK data path
+            nltk.data.path = [nltk_data_dir] + nltk.data.path
+
+            # Download required NLTK data if not already present
+            try:
+                nltk.data.find('corpora/words')
+            except LookupError:
+                nltk.download('words', download_dir=nltk_data_dir)
+            
+            # Load word set
+            try:
+                self.word_set = set(words.words())
+            except Exception as e:
+                logger.warning(f"Failed to load NLTK words, falling back to custom vocabulary: {e}")
+                self.word_set = set()
+                
             # Add custom vocabulary
             if custom_vocabulary:
                 self.custom_vocab.update(word.lower() for word in custom_vocabulary)
                 
             # Build frequency dictionary for SymSpell
-            for word in self.word_set | self.custom_vocab:
+            vocab_words = self.word_set | self.custom_vocab
+            if not vocab_words:
+                logger.warning("No vocabulary available, spelling correction may be limited")
+            
+            for word in vocab_words:
                 self.sym_spell.create_dictionary_entry(word, 1)
                 
+            logger.info(f"Initialized spelling corrector with {len(vocab_words)} words")
+                
         except Exception as e:
-            print(f"Failed to initialize spelling corrector: {e}")
+            logger.error(f"Failed to initialize spelling corrector: {e}")
+            # Continue with empty word set rather than failing
+            self.word_set = set()
             
     def _tokenize_query(self, query: str) -> List[str]:
         """Tokenize query into words"""

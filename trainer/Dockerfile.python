@@ -2,7 +2,7 @@ ARG BASE_IMAGE=ml-base:latest
 FROM ${BASE_IMAGE} as base
 
 # Create directories without user permissions
-RUN mkdir -p /app/cache/{transformers,huggingface,datasets,torch,models} && \
+RUN mkdir -p /app/cache/{transformers,huggingface,datasets,torch,models,nltk_data} && \
     mkdir -p /app/shared_models
 
 RUN pip3 uninstall numpy -y
@@ -20,7 +20,8 @@ ENV TRANSFORMERS_CACHE="/app/cache/transformers" \
     TORCH_HOME="/app/cache/torch" \
     XDG_CACHE_HOME="/app/cache" \
     HF_DATASETS_CACHE="/app/cache/datasets" \
-    MODEL_CACHE_DIR="/app/cache/models"
+    MODEL_CACHE_DIR="/app/cache/models" \
+    NLTK_DATA="/app/cache/nltk_data"
 
 # Copy application files
 FROM base as prod

@@ -57,6 +57,7 @@ services:
     volumes:
       - ./cache:/app/cache:rw  # Add explicit read-write flag
       - ./models:/app/models:rw  # Add explicit read-write flag
+      - ./cache/nltk_data:/app/cache/nltk_data:rw
     deploy:
       resources:
         reservations:
