@@ -1,7 +1,3 @@
-"""
-Enhanced Search Service with Dynamic Query Understanding and Context Extraction
-"""
-
 import os
 import logging
 import threading
@@ -10,7 +6,7 @@ from typing import Dict, List, Optional, Any, Tuple
 import torch
 import numpy as np
 from sentence_transformers import SentenceTransformer, CrossEncoder
-from flask import Flask, request, jsonify
+from quart import Quart, request, jsonify 
 import boto3
 from botocore.exceptions import ClientError
 from botocore.config import Config
@@ -24,468 +20,49 @@ from transformers import pipeline
 import json
 import spacy
 from config import AppConfig
+import faiss
+from concurrent.futures import ThreadPoolExecutor
+from cachetools import TTLCache, LRUCache
+import time
+import pycorrector
+from rapidfuzz import process, fuzz
+import asyncio
+from typing import Union
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
+app = Quart(__name__)
 
 
-class DynamicQueryUnderstanding:
-    """Enhanced query understanding with dynamic context extraction"""
+class ModelCache:
+    """Enhanced model caching with thread safety"""
 
-    def __init__(self):
-        self.device = 0 if torch.cuda.is_available() else -1
-        self.zero_shot = pipeline(
-            "zero-shot-classification",
-            model="facebook/bart-large-mnli",
-            device=self.device,
-        )
-        self.qa_model = pipeline(
-            "question-answering",
-            model="deepset/roberta-base-squad2",
-            device=self.device,
-        )
-        self.query_expansion_model = pipeline(
-            "text2text-generation", model="google/flan-t5-base", device=self.device
-        )
-        self.feature_extractor = pipeline(
-            "feature-extraction",
-            model="sentence-transformers/all-MiniLM-L6-v2",
-            device=self.device,
-        )
-        try:
-            self.nlp = spacy.load("en_core_web_sm")
-        except OSError:
-            spacy.cli.download("en_core_web_sm")
-            self.nlp = spacy.load("en_core_web_sm")
+    def __init__(self, max_size: int = 4):
+        self.cache = OrderedDict()
+        self.max_size = max_size
+        self.lock = threading.Lock()
 
-    def _get_dynamic_categories(self, text: str) -> List[Dict[str, float]]:
-        """Dynamically extract categories from text"""
-        prompts = [
-            "What is the main topic or domain of this query?",
-            "What specific aspects or features are being searched for?",
-            "What is the user's intent or goal?",
-            "What constraints or requirements are mentioned?",
-        ]
-        categories = []
-        for prompt in prompts:
-            context = f"Query: {text}\nQuestion: {prompt}"
-            response = self.qa_model(question=prompt, context=context)
-            if response["score"] > 0.3:
-                categories.append(
-                    {
-                        "category": response["answer"],
-                        "confidence": float(response["score"]),
-                    }
-                )
-        return categories
+    def get(self, model_path: str) -> Optional[Dict]:
+        with self.lock:
+            if model_path in self.cache:
+                self.cache.move_to_end(model_path)
+                return self.cache[model_path]
+            return None
 
-    def _expand_query(self, query: str) -> List[str]:
-        """Intent-aware query expansion without recursive analyze call"""
-        # Get intent directly without full analysis
-        intent_results = self.zero_shot(
-            query,
-            candidate_labels=["search", "compare", "explore", "purchase", "learn"],
-            multi_label=True,
-        )
-        primary_intent = (
-            intent_results["labels"][0] if intent_results["labels"] else "search"
-        )
-
-        prompt = {
-            "search": f"Expand this product search query with specific attributes: {query}",
-            "compare": f"Generate comparison terms for: {query}",
-            "explore": f"Suggest related categories for: {query}",
-            "purchase": f"Generate purchase-related terms for: {query}",
-            "learn": f"Expand this informational query with technical terms: {query}",
-        }.get(primary_intent, f"Generate relevant search terms for: {query}")
-
-        try:
-            expanded = self.query_expansion_model(
-                prompt,
-                max_length=50,
-                num_return_sequences=1,
-                num_beams=3,
-                early_stopping=True,
-            )
-            return list(set([query] + expanded[0]["generated_text"].split()))
-        except Exception as e:
-            logger.error(f"Query expansion failed: {e}")
-            return [query]
-
-    def _get_sentiment(self, text: str) -> float:
-        """Analyze text sentiment with explicit model"""
-        if not hasattr(self, "sentiment_analyzer"):
-            self.sentiment_analyzer = pipeline(
-                "sentiment-analysis",
-                model="distilbert/distilbert-base-uncased-finetuned-sst-2-english",
-                device=self.device
-            )
-        try:
-            result = self.sentiment_analyzer(text[:512])[0]  # Truncate to max length
-            return result["score"] if result["label"] == "POSITIVE" else -result["score"]
-        except Exception as e:
-            logger.error(f"Sentiment analysis failed: {e}")
-            return 0.0
-
-    def _extract_semantic_features(self, text: str) -> Dict[str, Any]:
-        """Extract semantic features from text"""
-        doc = self.nlp(text)
-        return {
-            "entities": [{"text": ent.text, "label": ent.label_} for ent in doc.ents],
-            "key_phrases": [chunk.text for chunk in doc.noun_chunks],
-            "sentiment": self._get_sentiment(doc.text),
-            "dependencies": [
-                {"text": token.text, "dep": token.dep_}
-                for token in doc
-                if token.dep_ not in ["punct", "det"]
-            ],
-        }
-
-    def analyze(self, query: str, context: Optional[Dict] = None) -> Dict:
-        """Comprehensive query analysis with cleaned response"""
-        try:
-            categories = self._get_dynamic_categories(query)
-            expanded_terms = self._expand_query(query)
-            semantic_features = self._extract_semantic_features(query)
-            intent_labels = ["search", "compare", "explore", "purchase", "learn"]
-            intent_results = self.zero_shot(
-                query, candidate_labels=intent_labels, multi_label=True
-            )
-
-            understanding = {
-                "original_query": query,
-                "categories": categories,
-                "expanded_terms": expanded_terms,
-                "semantic_features": semantic_features,
-                "intent": {
-                    "labels": intent_results["labels"],
-                    "scores": [float(score) for score in intent_results["scores"]],
-                },
-            }
-
-            if context:
-                understanding["context"] = self._analyze_context(query, context)
-            return understanding
-
-        except Exception as e:
-            logger.error(f"Query analysis failed: {e}")
-            return {"original_query": query, "error": str(e)}
-
-    def _get_sentiment(self, text: str) -> float:
-        """Analyze text sentiment using transformers pipeline"""
-        sentiment_analyzer = pipeline("sentiment-analysis", device=self.device)
-        return sentiment_analyzer(text)[0]["score"]
-
-    def _analyze_context(self, query: str, context: Dict) -> Dict:
-        """Analyze query in relation to provided context"""
-        context_understanding = {}
-
-        try:
-            # Analyze query-context relevance
-            if "previous_queries" in context:
-                context_understanding["query_evolution"] = (
-                    self._analyze_query_evolution(query, context["previous_queries"])
-                )
-
-            # Analyze domain context if available
-            if "domain" in context:
-                context_understanding["domain_relevance"] = (
-                    self._analyze_domain_relevance(query, context["domain"])
-                )
-
-            # Add user preferences if available
-            if "user_preferences" in context:
-                context_understanding["preference_match"] = self._analyze_preferences(
-                    query, context["user_preferences"]
-                )
-
-        except Exception as e:
-            logger.error(f"Context analysis failed: {e}")
-            context_understanding["error"] = str(e)
-
-        return context_understanding
-
-    def _analyze_query_evolution(
-        self, current_query: str, previous_queries: List[str]
-    ) -> Dict:
-        """Analyze how the query has evolved from previous queries"""
-        try:
-            if not previous_queries:
-                return {"type": "initial_query"}
-
-            # Compare with most recent query
-            last_query = previous_queries[-1]
-
-            # Get semantic similarity
-            similarity = float(
-                np.dot(
-                    self.feature_extractor(current_query, return_tensors=True)[0].mean(
-                        axis=0
-                    ),
-                    self.feature_extractor(last_query, return_tensors=True)[0].mean(
-                        axis=0
-                    ),
-                )
-            )
-
-            # Determine evolution type
-            if similarity > 0.8:
-                evolution_type = "refinement"
-            elif similarity > 0.5:
-                evolution_type = "related"
+    def put(self, model_path: str, data: Dict):
+        with self.lock:
+            if model_path in self.cache:
+                self.cache.move_to_end(model_path)
             else:
-                evolution_type = "new_topic"
-
-            return {
-                "type": evolution_type,
-                "similarity": similarity,
-                "previous_query": last_query,
-            }
-
-        except Exception as e:
-            logger.error(f"Query evolution analysis failed: {e}")
-            return {"error": str(e)}
-
-    def _analyze_domain_relevance(self, query: str, domain: str) -> Dict:
-        """Analyze query relevance to specific domain"""
-        try:
-            # Get domain relevance score
-            relevance = self.zero_shot(
-                query, candidate_labels=[domain], multi_label=False
-            )
-
-            return {
-                "domain": domain,
-                "relevance_score": float(relevance["scores"][0]),
-                "is_relevant": relevance["scores"][0] > 0.5,
-            }
-
-        except Exception as e:
-            logger.error(f"Domain relevance analysis failed: {e}")
-            return {"error": str(e)}
-
-    def _analyze_preferences(self, query: str, preferences: Dict[str, Any]) -> Dict:
-        """Analyze how query matches user preferences"""
-        try:
-            matches = {}
-            for pref_type, pref_value in preferences.items():
-                # Check if preference appears in query
-                relevance = self.zero_shot(
-                    query, candidate_labels=[str(pref_value)], multi_label=False
-                )
-                matches[pref_type] = {
-                    "value": pref_value,
-                    "match_score": float(relevance["scores"][0]),
-                }
-
-            return matches
-
-        except Exception as e:
-            logger.error(f"Preference analysis failed: {e}")
-            return {"error": str(e)}
-
-
-class HybridSearchEngine:
-    """Enhanced hybrid search engine with intent-aware scoring"""
-
-    def __init__(self):
-        self.bm25 = None
-        self.tokenized_corpus = None
-        self.reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-        self.query_understanding = DynamicQueryUnderstanding()
-
-    def _get_ranking_factors(self, candidate: Dict, query_analysis: Dict) -> Dict:
-        """Get factors influencing the ranking"""
-        return {
-            "category_matches": [
-                c
-                for c in query_analysis.get("categories", [])
-                if c["category"].lower() in candidate["text"].lower()
-            ],
-            "entity_matches": [
-                e
-                for e in query_analysis.get("semantic_features", {}).get("entities", [])
-                if e["text"].lower() in candidate["text"].lower()
-            ],
-        }
-
-    def _normalize_scores(self, scores: np.ndarray) -> np.ndarray:
-        """Safe normalization with epsilon"""
-        scores = np.nan_to_num(scores, nan=0.0, posinf=0.0, neginf=0.0)
-        if np.ptp(scores) < 1e-6:  # Prevent division by zero
-            return np.zeros_like(scores)
-        return (scores - scores.min()) / np.ptp(scores)
-
-    def initialize(self, texts: List[str]) -> bool:
-        """Initialize search engine with corpus"""
-        try:
-            if not texts:
-                logger.error("Empty text corpus")
-                return False
-
-            self.tokenized_corpus = []
-            for text in texts:
-                try:
-                    tokenized = (
-                        word_tokenize(text.lower()) if isinstance(text, str) else []
-                    )
-                    self.tokenized_corpus.append(tokenized)
-                except Exception as e:
-                    logger.warning(f"Error tokenizing document: {e}")
-                    self.tokenized_corpus.append([])
-
-            self.bm25 = BM25Okapi(self.tokenized_corpus)
-            return True
-
-        except Exception as e:
-            logger.error(f"Search engine initialization failed: {e}")
-            return False
-
-    def hybrid_search(
-        self,
-        query: str,
-        semantic_scores: np.ndarray,
-        context: Optional[Dict] = None,
-        alpha: float = 0.7,
-    ) -> Tuple[np.ndarray, Dict]:
-        """Enhanced hybrid search with intent-aware scoring"""
-        try:
-            if self.bm25 is None:
-                logger.warning("BM25 not initialized. Call initialize() first.")
-            query_analysis = self.query_understanding.analyze(query, context)
-            tokenized_query = word_tokenize(query.lower())
-            bm25_scores = np.array(self.bm25.get_scores(tokenized_query))
-
-            bm25_scores = self._normalize_scores(bm25_scores)
-            semantic_scores = self._normalize_scores(semantic_scores)
-
-            alpha = self._adjust_weights(query_analysis)
-            combined_scores = alpha * semantic_scores + (1 - alpha) * bm25_scores
-
-            return combined_scores, {
-                "query_understanding": query_analysis,
-                "scores": {
-                    "semantic": semantic_scores.mean(),
-                    "lexical": bm25_scores.mean(),
-                    "combined": combined_scores.mean(),
-                },
-                "weights": {"semantic": alpha, "lexical": 1 - alpha},
-            }
-
-        except Exception as e:
-            logger.error(f"Hybrid search failed: {e}")
-            return semantic_scores, {"error": str(e)}
-
-    def _adjust_weights(self, query_analysis: Dict) -> float:
-        """Dynamically adjust weights based on query analysis"""
-        base_alpha = 0.7
-        intent_weights = {
-            "learn": 0.15,
-            "explore": 0.1,
-            "search": -0.1,
-            "compare": 0.2,
-            "purchase": -0.15,
-        }
-
-        if "intent" in query_analysis:
-            intent_scores = dict(
-                zip(
-                    query_analysis["intent"]["labels"],
-                    query_analysis["intent"]["scores"],
-                )
-            )
-            for intent, score in intent_scores.items():
-                base_alpha += intent_weights.get(intent, 0) * score
-
-        if "semantic_features" in query_analysis:
-            features = query_analysis["semantic_features"]
-            entity_boost = min(0.1 * len(features.get("entities", [])), 0.3)
-            base_alpha += entity_boost
-        if query_analysis.get("intent", {}).get("labels"):
-            primary_intent = query_analysis["intent"]["labels"][0]
-        if primary_intent in ["learn", "compare"]:
-            base_alpha = max(base_alpha, 0.6)
-        return max(0.3, min(0.9, base_alpha))
-
-    def rerank(
-        self, query: str, candidates: List[Dict], query_analysis: Dict, top_k: int = 10
-    ) -> List[Dict]:
-        """Intent-aware reranking"""
-        if not candidates:
-            return []
-
-        try:
-            pairs = [(query, doc["text"]) for doc in candidates]
-            scores = self.reranker.predict(pairs)
-            adjusted_scores = self._adjust_scores(scores, candidates, query_analysis)
-
-            for i, score in enumerate(adjusted_scores):
-                candidates[i]["rerank_score"] = float(score)
-                candidates[i]["ranking_factors"] = self._get_ranking_factors(
-                    candidates[i], query_analysis
-                )
-
-            return sorted(candidates, key=lambda x: x["rerank_score"], reverse=True)[
-                :top_k
-            ]
-
-        except Exception as e:
-            logger.error(f"Reranking failed: {e}")
-            return candidates[:top_k]
-
-    def _adjust_scores(
-        self, base_scores: np.ndarray, candidates: List[Dict], query_analysis: Dict
-    ) -> np.ndarray:
-        """Adjust scores based on query understanding"""
-        scores = np.array(base_scores)
-        intent_scores = (
-            dict(
-                zip(
-                    query_analysis["intent"]["labels"],
-                    query_analysis["intent"]["scores"],
-                )
-            )
-            if "intent" in query_analysis
-            else {}
-        )
-
-        for i, candidate in enumerate(candidates):
-            boost = 1.0
-
-            # Intent-specific boosting
-            if intent_scores.get("compare", 0) > 0.3:
-                compare_attrs = ["specifications", "features", "price"]
-                boost += 0.1 * sum(
-                    1 for attr in compare_attrs if attr in candidate.get("metadata", {})
-                )
-
-            if intent_scores.get("purchase", 0) > 0.3:
-                purchase_attrs = ["in_stock", "price", "delivery_options"]
-                boost += 0.15 * sum(
-                    1
-                    for attr in purchase_attrs
-                    if candidate.get("metadata", {}).get(attr)
-                )
-
-            # Existing boosts
-            for category in query_analysis.get("categories", []):
-                if category["category"].lower() in candidate["text"].lower():
-                    boost += category["confidence"] * 0.2
-
-            for entity in query_analysis.get("semantic_features", {}).get(
-                "entities", []
-            ):
-                if entity["text"].lower() in candidate["text"].lower():
-                    boost += 0.1
-
-            scores[i] *= boost
-
-        return (scores - scores.min()) / (scores.max() - scores.min())
+                if len(self.cache) >= self.max_size:
+                    self.cache.popitem(last=False)
+                self.cache[model_path] = data
 
 
 class S3Manager:
+    """Enhanced S3 manager with retry logic"""
+
     def __init__(self):
         retry_config = Config(
             retries=dict(max_attempts=AppConfig.MAX_RETRIES, mode="adaptive"),
@@ -521,30 +98,9 @@ class S3Manager:
             return None
 
 
-class ModelCache:
-    def __init__(self, max_size: int = 4):
-        self.cache = OrderedDict()
-        self.max_size = max_size
-        self.lock = threading.Lock()
-
-    def get(self, model_path: str) -> Optional[Dict]:
-        with self.lock:
-            if model_path in self.cache:
-                self.cache.move_to_end(model_path)
-                return self.cache[model_path]
-            return None
-
-    def put(self, model_path: str, data: Dict):
-        with self.lock:
-            if model_path in self.cache:
-                self.cache.move_to_end(model_path)
-            else:
-                if len(self.cache) >= self.max_size:
-                    self.cache.popitem(last=False)
-                self.cache[model_path] = data
-
-
 class EmbeddingManager:
+    """Enhanced embedding manager with model versioning"""
+
     def __init__(self):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.embedding_models = {}
@@ -618,19 +174,448 @@ class EmbeddingManager:
                 torch.cuda.empty_cache()
 
 
-class SearchService:
-    """Enhanced search service with intent-aware processing"""
+class EnhancedQueryUnderstanding:
+    """Enhanced query understanding with improved preprocessing"""
+
+    def __init__(self):
+        self.device = 0 if torch.cuda.is_available() else -1
+        self.zero_shot = pipeline(
+            "zero-shot-classification",
+            model="facebook/bart-large-mnli",
+            device=self.device,
+        )
+        self.qa_model = pipeline(
+            "question-answering",
+            model="deepset/roberta-base-squad2",
+            device=self.device,
+        )
+        self.query_expansion_model = pipeline(
+            "text2text-generation", model="google/flan-t5-base", device=self.device
+        )
+        self.feature_extractor = pipeline(
+            "feature-extraction",
+            model="sentence-transformers/all-MiniLM-L6-v2",
+            device=self.device,
+        )
+        self.keyphrase_model = pipeline(
+            "keyphrase-extraction",
+            model="ml6team/keyphrase-extraction-distilbert-inspec",
+            device=self.device,
+        )
+        try:
+            self.nlp = spacy.load("en_core_web_sm")
+        except OSError:
+            spacy.cli.download("en_core_web_sm")
+            self.nlp = spacy.load("en_core_web_sm")
+
+        if not hasattr(self, "sentiment_analyzer"):
+            self.sentiment_analyzer = pipeline(
+                "sentiment-analysis",
+                model="distilbert/distilbert-base-uncased-finetuned-sst-2-english",
+                device=self.device,
+            )
+
+    def _correct_spelling(self, query: str) -> str:
+        """Apply spelling correction to query"""
+        try:
+            corrected, _ = pycorrector.correct(query)
+            return corrected
+        except:
+            return query
+
+    def _extract_keyphrases(self, query: str) -> List[str]:
+        """Extract key phrases from query"""
+        try:
+            return [kp["word"] for kp in self.keyphrase_model(query)]
+        except:
+            return []
+
+    def _get_dynamic_categories(self, text: str) -> List[Dict[str, float]]:
+        """Dynamically extract categories from text"""
+        prompts = [
+            "What is the main topic or domain of this query?",
+            "What specific aspects or features are being searched for?",
+            "What is the user's intent or goal?",
+            "What constraints or requirements are mentioned?",
+        ]
+        categories = []
+        for prompt in prompts:
+            context = f"Query: {text}\nQuestion: {prompt}"
+            response = self.qa_model(question=prompt, context=context)
+            if response["score"] > 0.3:
+                categories.append(
+                    {
+                        "category": response["answer"],
+                        "confidence": float(response["score"]),
+                    }
+                )
+        return categories
+
+    def _expand_query(self, query: str) -> List[str]:
+        """Intent-aware query expansion"""
+        intent_results = self.zero_shot(
+            query,
+            candidate_labels=["search", "compare", "explore", "purchase", "learn"],
+            multi_label=True,
+        )
+        primary_intent = (
+            intent_results["labels"][0] if intent_results["labels"] else "search"
+        )
+
+        prompt_templates = {
+            "search": f"Expand this product search query with specific attributes: {query}",
+            "compare": f"Generate comparison terms for: {query}",
+            "explore": f"Suggest related categories for: {query}",
+            "purchase": f"Generate purchase-related terms for: {query}",
+            "learn": f"Expand this informational query with technical terms: {query}",
+        }
+
+        prompt = prompt_templates.get(
+            primary_intent, f"Generate relevant search terms for: {query}"
+        )
+
+        try:
+            expanded = self.query_expansion_model(
+                prompt,
+                max_length=50,
+                num_return_sequences=1,
+                num_beams=3,
+                early_stopping=True,
+            )
+            expanded_terms = expanded[0]["generated_text"].split()
+            return list(set([query] + expanded_terms))
+        except Exception as e:
+            logger.error(f"Query expansion failed: {e}")
+            return [query]
+
+    def _extract_semantic_features(self, text: str) -> Dict[str, Any]:
+        """Extract semantic features from text"""
+        doc = self.nlp(text)
+        return {
+            "entities": [{"text": ent.text, "label": ent.label_} for ent in doc.ents],
+            "key_phrases": [chunk.text for chunk in doc.noun_chunks],
+            "sentiment": self._get_sentiment(doc.text),
+            "dependencies": [
+                {"text": token.text, "dep": token.dep_}
+                for token in doc
+                if token.dep_ not in ["punct", "det"]
+            ],
+        }
+
+    def _get_sentiment(self, text: str) -> float:
+        """Analyze text sentiment"""
+        try:
+            result = self.sentiment_analyzer(text[:512])[0]
+            return (
+                result["score"] if result["label"] == "POSITIVE" else -result["score"]
+            )
+        except Exception as e:
+            logger.error(f"Sentiment analysis failed: {e}")
+            return 0.0
+
+    def _analyze_context(self, query: str, context: Dict) -> Dict:
+        """Analyze query in context"""
+        context_understanding = {}
+
+        try:
+            if "previous_queries" in context:
+                context_understanding["query_evolution"] = (
+                    self._analyze_query_evolution(query, context["previous_queries"])
+                )
+
+            if "domain" in context:
+                context_understanding["domain_relevance"] = (
+                    self._analyze_domain_relevance(query, context["domain"])
+                )
+
+            if "user_preferences" in context:
+                context_understanding["preference_match"] = self._analyze_preferences(
+                    query, context["user_preferences"]
+                )
+
+        except Exception as e:
+            logger.error(f"Context analysis failed: {e}")
+            context_understanding["error"] = str(e)
+
+        return context_understanding
+
+    def _analyze_query_evolution(
+        self, current_query: str, previous_queries: List[str]
+    ) -> Dict:
+        """Analyze query evolution"""
+        try:
+            if not previous_queries:
+                return {"type": "initial_query"}
+
+            last_query = previous_queries[-1]
+            similarity = float(
+                np.dot(
+                    self.feature_extractor(current_query, return_tensors=True)[0].mean(
+                        axis=0
+                    ),
+                    self.feature_extractor(last_query, return_tensors=True)[0].mean(
+                        axis=0
+                    ),
+                )
+            )
+
+            if similarity > 0.8:
+                evolution_type = "refinement"
+            elif similarity > 0.5:
+                evolution_type = "related"
+            else:
+                evolution_type = "new_topic"
+
+            return {
+                "type": evolution_type,
+                "similarity": similarity,
+                "previous_query": last_query,
+            }
+
+        except Exception as e:
+            logger.error(f"Query evolution analysis failed: {e}")
+            return {"error": str(e)}
+
+    def analyze(self, query: str, context: Optional[Dict] = None) -> Dict:
+        """Comprehensive query analysis"""
+        try:
+            # Enhanced preprocessing
+            query = self._correct_spelling(query.lower().strip())
+
+            # Get basic analysis
+            categories = self._get_dynamic_categories(query)
+            expanded_terms = self._expand_query(query)
+            semantic_features = self._extract_semantic_features(query)
+
+            # Get intent analysis
+            intent_labels = ["search", "compare", "explore", "purchase", "learn"]
+            intent_results = self.zero_shot(
+                query, candidate_labels=intent_labels, multi_label=True
+            )
+
+            # Extract keyphrases and fuzzy matches
+            keyphrases = self._extract_keyphrases(query)
+            fuzzy_terms = list(
+                set(
+                    process.extract(
+                        query, expanded_terms, limit=3, scorer=fuzz.token_set_ratio
+                    )
+                )
+            )
+
+            understanding = {
+                "original_query": query,
+                "categories": categories,
+                "expanded_terms": expanded_terms,
+                "semantic_features": semantic_features,
+                "keyphrases": keyphrases,
+                "fuzzy_terms": fuzzy_terms,
+                "intent": {
+                    "labels": intent_results["labels"],
+                    "scores": [float(score) for score in intent_results["scores"]],
+                },
+            }
+
+            if context:
+                understanding["context"] = self._analyze_context(query, context)
+
+            return understanding
+
+        except Exception as e:
+            logger.error(f"Query analysis failed: {e}")
+            return {"original_query": query, "error": str(e)}
+
+
+class FastReranker:
+    """Two-stage reranker with caching for optimal performance"""
+
+    def __init__(self):
+        self.light_ranker = CrossEncoder("cross-encoder/ms-marco-TinyBERT-L-2-v2")
+        self.heavy_ranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        self.cache = LRUCache(maxsize=1000)
+
+    def rerank(self, query: str, candidates: List[Dict], top_k: int = 10) -> List[Dict]:
+        """Two-stage reranking with caching"""
+        cache_key = f"{query[:50]}_{top_k}"
+        if cached := self.cache.get(cache_key):
+            return cached
+
+        if not candidates:
+            return []
+
+        try:
+            # First stage: light reranking
+            pairs = [(query, c["text"]) for c in candidates]
+            light_scores = self.light_ranker.predict(pairs, batch_size=32)
+            top_indices = np.argpartition(light_scores, -50)[-50:]
+
+            # Second stage: heavy reranking
+            heavy_pairs = [(query, candidates[i]["text"]) for i in top_indices]
+            heavy_scores = self.heavy_ranker.predict(heavy_pairs)
+
+            # Combine results
+            for i, score in zip(top_indices, heavy_scores):
+                candidates[i]["rerank_score"] = float(score)
+
+            reranked = sorted(
+                candidates, key=lambda x: x.get("rerank_score", 0), reverse=True
+            )[:top_k]
+            self.cache[cache_key] = reranked
+            return reranked
+
+        except Exception as e:
+            logger.error(f"Reranking failed: {e}")
+            return candidates[:top_k]
+
+
+class OptimizedHybridSearch:
+    """Optimized hybrid search engine with FAISS integration"""
+
+    def __init__(self):
+        self.bm25 = None
+        self.tokenized_corpus = None
+        self.faiss_index = None
+        self.executor = ThreadPoolExecutor(max_workers=4)
+        self.reranker = FastReranker()
+        self.exact_match_boost = 3.0
+        self.field_weights = {
+            "name": 2.5,
+            "category": 1.8,
+            "description": 1.2,
+            "specifications": 1.5,
+        }
+
+    def initialize(self, texts: List[str], embeddings: np.ndarray) -> bool:
+        """Initialize search engine with corpus and FAISS index"""
+        try:
+            if not texts:
+                logger.error("Empty text corpus")
+                return False
+
+            # Initialize BM25
+            self.tokenized_corpus = []
+            for text in texts:
+                try:
+                    tokenized = (
+                        word_tokenize(text.lower()) if isinstance(text, str) else []
+                    )
+                    self.tokenized_corpus.append(tokenized)
+                except Exception as e:
+                    logger.warning(f"Error tokenizing document: {e}")
+                    self.tokenized_corpus.append([])
+
+            self.bm25 = BM25Okapi(self.tokenized_corpus)
+
+            # Initialize FAISS
+            dim = embeddings.shape[1]
+            self.faiss_index = faiss.IndexFlatIP(dim)
+            self.faiss_index.add(embeddings.astype("float32"))
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Search engine initialization failed: {e}")
+            return False
+
+    def _exact_match_boost(self, candidate: Dict, query_terms: List[str]) -> float:
+        """Calculate exact match boost for a candidate"""
+        boost = 1.0
+        for field, weight in self.field_weights.items():
+            if field in candidate:
+                field_text = candidate[field].lower()
+                for term in query_terms:
+                    if term in field_text:
+                        boost += weight * 0.2
+        return min(boost, self.exact_match_boost)
+
+    def hybrid_search(
+        self, query: str, query_embed: np.ndarray, context: Dict, k: int = 200
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Perform hybrid search with FAISS and BM25"""
+        try:
+            start_time = time.time()
+
+            # First-stage FAISS search
+            D, I = self.faiss_index.search(query_embed.astype("float32"), k)
+            semantic_scores = D[0]
+
+            # Get BM25 scores
+            tokenized_query = word_tokenize(query.lower())
+            bm25_scores = np.array(self.bm25.get_scores(tokenized_query))
+            bm25_scores = bm25_scores[I[0]]
+
+            # Combine scores with dynamic weighting
+            alpha = self._adjust_weights(context["query_analysis"])
+            combined_scores = alpha * semantic_scores + (1 - alpha) * bm25_scores
+
+            # Apply exact match boosts
+            query_terms = set(
+                tokenized_query + context["query_analysis"].get("keyphrases", [])
+            )
+            boosted_scores = []
+
+            for idx, score in zip(I[0], combined_scores):
+                candidate = {
+                    "text": " ".join(self.tokenized_corpus[idx]),
+                    "score": score,
+                }
+                boost = self._exact_match_boost(candidate, query_terms)
+                boosted_scores.append(score * boost)
+
+            boosted_scores = np.array(boosted_scores)
+
+            logger.info(f"Hybrid search completed in {time.time()-start_time:.3f}s")
+            return I[0], boosted_scores
+
+        except Exception as e:
+            logger.error(f"Optimized search failed: {e}")
+            return np.array([]), np.array([])
+
+    def _adjust_weights(self, query_analysis: Dict) -> float:
+        """Dynamically adjust weights based on query analysis"""
+        base_alpha = 0.7
+        intent_weights = {
+            "learn": 0.15,
+            "explore": 0.1,
+            "search": -0.1,
+            "compare": 0.2,
+            "purchase": -0.15,
+        }
+
+        if "intent" in query_analysis:
+            intent_scores = dict(
+                zip(
+                    query_analysis["intent"]["labels"],
+                    query_analysis["intent"]["scores"],
+                )
+            )
+            for intent, score in intent_scores.items():
+                base_alpha += intent_weights.get(intent, 0) * score
+
+        if "semantic_features" in query_analysis:
+            features = query_analysis["semantic_features"]
+            entity_boost = min(0.1 * len(features.get("entities", [])), 0.3)
+            base_alpha += entity_boost
+
+        return max(0.3, min(0.9, base_alpha))
+
+
+class EnhancedSearchService:
+    """Enhanced search service with optimizations"""
 
     def __init__(self):
         self.s3_manager = S3Manager()
         self.model_cache = ModelCache(AppConfig.MODEL_CACHE_SIZE)
         self.embedding_manager = EmbeddingManager()
-        self.hybrid_search = HybridSearchEngine()
+        self.query_understanding = EnhancedQueryUnderstanding()
+        self.hybrid_search = OptimizedHybridSearch()
+        self.query_cache = TTLCache(maxsize=1000, ttl=300)
+        self.preprocessed_embeddings = {}
         self.current_query_analysis = {}
         self._initialize_required_models()
 
     def _initialize_required_models(self):
-        """Preload required models from config"""
+        """Initialize required models and components"""
         try:
             for model_key in AppConfig.REQUIRED_MODELS:
                 self.embedding_manager.get_model(model_key)
@@ -638,12 +623,46 @@ class SearchService:
         except Exception as e:
             logger.error(f"Error preloading models: {e}")
 
-    def _load_products(self, model_path: str) -> Optional[pd.DataFrame]:
-        """Load products data from local or S3"""
-        local_path = os.path.join(AppConfig.BASE_MODEL_DIR, model_path, "products.csv")
-        if os.path.exists(local_path):
-            return pd.read_csv(local_path)
-        return self.s3_manager.get_csv_content(f"{model_path}/products.csv")
+    async def initialize_model(self, model_path: str) -> bool:
+        """Initialize model data and indices"""
+        try:
+            model_data = self.load_model(model_path)
+            if not model_data:
+                return False
+
+            # Initialize search engine
+            embeddings = model_data["embeddings"].astype("float32")
+            texts = self._get_searchable_texts(model_data["products"])
+            self.hybrid_search.initialize(texts, embeddings)
+
+            # Preprocess field embeddings
+            self._preprocess_field_embeddings(model_data["products"])
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Model initialization failed: {e}")
+            return False
+
+    def _preprocess_field_embeddings(self, products: pd.DataFrame):
+        """Precompute embeddings for critical fields"""
+        fields = ["name", "category", "specifications"]
+        for field in fields:
+            if field in products.columns:
+                texts = products[field].astype(str).tolist()
+                embeddings = self.embedding_manager.generate_embedding(texts)
+                self.preprocessed_embeddings[field] = embeddings
+
+    def _get_searchable_texts(self, products: pd.DataFrame) -> List[str]:
+        """Combine relevant fields into searchable texts"""
+        texts = []
+        for _, row in products.iterrows():
+            text_parts = []
+            for field in ["name", "category", "description", "specifications"]:
+                if field in row and pd.notna(row[field]):
+                    text_parts.append(str(row[field]))
+            texts.append(" ".join(text_parts))
+        return texts
 
     def load_model(self, model_path: str) -> Optional[Dict]:
         """Load model data from cache or storage"""
@@ -654,22 +673,27 @@ class SearchService:
 
             model_dir = os.path.join(AppConfig.BASE_MODEL_DIR, model_path)
             if os.path.exists(model_dir):
-                return self._load_from_local(model_dir, model_path)
-
+                return self._load_from_local(model_dir)
             return self._load_from_s3(model_path)
+
         except Exception as e:
             logger.error(f"Error loading model: {e}")
             return None
 
-    def _load_from_local(self, model_dir: str, model_path: str) -> Optional[Dict]:
+    def _load_from_local(self, model_dir: str) -> Optional[Dict]:
         """Load model data from local storage"""
         try:
             embeddings = np.load(os.path.join(model_dir, "embeddings.npy"))
+
             with open(os.path.join(model_dir, "metadata.json")) as f:
                 metadata = json.load(f)
+
+            products_df = pd.read_csv(os.path.join(model_dir, "products.csv"))
+
             return {
                 "embeddings": embeddings,
                 "metadata": metadata,
+                "products": products_df,
                 "loaded_at": datetime.now().isoformat(),
             }
         except Exception as e:
@@ -688,49 +712,55 @@ class SearchService:
                     f"{model_path}/{file}", os.path.join(model_dir, file)
                 ):
                     return None
-            return self._load_from_local(model_dir, model_path)
+
+            return self._load_from_local(model_dir)
+
         except Exception as e:
             logger.error(f"Error loading from S3: {e}")
             return None
 
     def _process_candidate(
-        self, product: pd.Series, schema: Dict, score: float, idx: int
+        self, product: pd.Series, score: float, schema: Dict
     ) -> Dict:
-        """Process candidate with intent-aware scoring"""
+        """Process and enrich search candidate"""
         try:
-            # Base processing
-            text_parts = []
-            id_column = schema.get("idcolumn", "ratings")
-            candidate_id = (
-                str(product[id_column]) if id_column in product else str(product.name)
-            )
-
+            # Get field mappings
+            id_column = schema.get("idcolumn", "id")
             field_mappings = {
                 "name": schema.get("namecolumn", "name"),
-                "description": schema.get("descriptioncolumn", "sub_category"),
-                "category": schema.get("categorycolumn", "main_category"),
+                "description": schema.get("descriptioncolumn", "description"),
+                "category": schema.get("categorycolumn", "category"),
             }
 
+            # Build candidate
             candidate = {
-                "id": candidate_id,
-                "score": score,
+                "id": (
+                    str(product[id_column])
+                    if id_column in product
+                    else str(product.name)
+                ),
+                "score": float(score),
                 "metadata": {},
+                "field_matches": {},
                 "intent_matches": {},
             }
 
-            # Add fields and text
+            # Add mapped fields
+            text_parts = []
             for field, column in field_mappings.items():
-                candidate[field] = str(product[column]) if column in product else ""
-                if candidate[field]:
-                    text_parts.append(candidate[field])
+                if column in product and pd.notna(product[column]):
+                    value = str(product[column])
+                    candidate[field] = value
+                    text_parts.append(value)
+
             candidate["text"] = " ".join(text_parts)
 
             # Add custom fields
             for field in schema.get("customcolumns", []):
-                if field in product:
+                if field in product and pd.notna(product[field]):
                     candidate["metadata"][field] = str(product[field])
 
-            # Intent-specific scoring
+            # Add intent-specific scoring
             intents = self.current_query_analysis.get("intent", {}).get("labels", [])
             if "compare" in intents:
                 candidate["intent_matches"]["compare"] = (
@@ -748,10 +778,11 @@ class SearchService:
                 candidate["intent_matches"]["explore"] = self._score_explore_features(
                     candidate
                 )
+
             return candidate
 
         except Exception as e:
-            logger.error(f"Error processing candidate: {str(e)}")
+            logger.error(f"Error processing candidate: {e}")
             return None
 
     def _score_comparison_features(self, candidate: Dict) -> float:
@@ -775,7 +806,7 @@ class SearchService:
 
     def _score_learn_features(self, candidate: Dict) -> float:
         """Score product for technical information"""
-        learn_terms = ["manual", "specification", "technical"]
+        learn_terms = ["manual", "specification", "technical", "guide", "documentation"]
         return sum(1 for term in learn_terms if term in candidate["text"].lower())
 
     def _score_explore_features(self, candidate: Dict) -> float:
@@ -788,7 +819,33 @@ class SearchService:
             ]
         )
 
-    def search(
+    def _find_field_matches(self, query: str, candidate: Dict) -> Dict:
+        """Find exact and semantic matches in fields"""
+        matches = {}
+        query_terms = set(word_tokenize(query.lower()))
+
+        for field in ["name", "category", "description"]:
+            if field in candidate:
+                field_text = candidate[field].lower()
+
+                # Exact matches
+                exact_matches = sum(1 for term in query_terms if term in field_text)
+
+                # Semantic similarity if available
+                semantic_score = 0.0
+                if field in self.preprocessed_embeddings:
+                    query_embed = self.embedding_manager.generate_embedding([query])[0]
+                    scores = np.dot(self.preprocessed_embeddings[field], query_embed)
+                    semantic_score = float(np.max(scores))
+
+                matches[field] = {
+                    "exact_matches": exact_matches,
+                    "semantic_score": semantic_score,
+                }
+
+        return matches
+
+    async def search(
         self,
         query: str,
         model_path: str,
@@ -796,62 +853,74 @@ class SearchService:
         max_items: int = 10,
         min_score: float = 0.4,
     ) -> Dict:
-        """Enhanced intent-aware search"""
+        """Perform enhanced search with optimizations"""
         try:
-            # Load model and data
+            start_time = time.time()
+
+            # Check cache
+            cache_key = f"{model_path}_{query}_{max_items}"
+            if cached := self.query_cache.get(cache_key):
+                return cached
+
+            # Load model data
             model_data = self.load_model(model_path)
             if not model_data:
                 raise ValueError(f"Failed to load model from {model_path}")
 
-            products_df = self._load_products(model_path)
-            if products_df is None:
-                raise ValueError("Failed to load products data")
-
-            # Generate embeddings and scores
-            model_name = model_data["metadata"]["models"]["embeddings"]
-            query_embed = self.embedding_manager.generate_embedding([query], model_name)
-            semantic_scores = np.dot(model_data["embeddings"], query_embed.reshape(-1))
-
-            # Initialize search context
-            context = context or {}
-            context.setdefault("previous_queries", []).append(query)
-
-            # Perform hybrid search
-            combined_scores, query_analysis = self.hybrid_search.hybrid_search(
-                query, semantic_scores, context=context
-            )
+            # Analyze query
+            query_analysis = self.query_understanding.analyze(query, context)
             self.current_query_analysis = query_analysis
 
-            # Get and process candidates
-            top_k_idx = np.argsort(combined_scores)[-max_items * 2 :][::-1]
+            # Generate query embedding
+            query_embed = self.embedding_manager.generate_embedding([query])[0]
+
+            # Perform hybrid search
+            indices, scores = await self.hybrid_search.hybrid_search(
+                query=query,
+                query_embed=query_embed.reshape(1, -1),
+                context={"query_analysis": query_analysis},
+                k=max_items * 2,
+            )
+
+            # Process candidates
             candidates = []
-            for idx in top_k_idx:
-                score = float(combined_scores[idx])
+            for idx, score in zip(indices, scores):
                 if score >= min_score:
                     candidate = self._process_candidate(
-                        products_df.iloc[idx],
-                        model_data["metadata"]["schema_mapping"],
+                        model_data["products"].iloc[idx],
                         score,
-                        idx,
+                        model_data["metadata"]["schema_mapping"],
                     )
                     if candidate:
+                        candidate["field_matches"] = self._find_field_matches(
+                            query, candidate
+                        )
                         candidates.append(candidate)
 
             # Rerank results
-            reranked = self.hybrid_search.rerank(
-                query, candidates, query_analysis, max_items
+            reranked_results = self.hybrid_search.reranker.rerank(
+                query, candidates, max_items
             )
 
-            return {
-                "results": reranked[:max_items],
-                "total": len(reranked),
+            # Prepare response
+            results = {
+                "results": reranked_results,
+                "total": len(reranked_results),
                 "query_info": {
                     "original": query,
                     "analysis": query_analysis,
-                    "context": context,
-                    "model": {"name": model_name, "path": model_path},
+                    "timing": {"total_time": time.time() - start_time},
+                    "model": {
+                        "name": model_data["metadata"]["models"]["embeddings"],
+                        "path": model_path,
+                    },
                 },
             }
+
+            # Cache results
+            self.query_cache[cache_key] = results
+
+            return results
 
         except Exception as e:
             logger.error(f"Search error: {str(e)}")
@@ -859,39 +928,44 @@ class SearchService:
 
 
 # Initialize service
-
-search_service = SearchService()
+search_service = EnhancedSearchService()
 
 
 @app.route("/search", methods=["POST"])
-def search():
+async def search():
     """Enhanced search endpoint with improved error handling"""
     try:
         data = request.get_json()
         if not data:
             return jsonify({"error": "Missing request data"}), 400
 
-        if "query" not in data:
-            return jsonify({"error": "Missing required field: query"}), 400
+        # Validate required fields
+        required_fields = ["query", "model_path"]
+        missing_fields = [field for field in required_fields if field not in data]
+        if missing_fields:
+            return (
+                jsonify(
+                    {"error": f"Missing required fields: {', '.join(missing_fields)}"}
+                ),
+                400,
+            )
 
-        if "model_path" not in data:
-            return jsonify({"error": "Missing required field: model_path"}), 400
-
+        # Perform search
         try:
-            results = search_service.search(
+            results = await search_service.search(
                 query=data["query"],
                 model_path=data["model_path"],
                 context=data.get("context"),
                 max_items=data.get("max_items", 10),
                 min_score=data.get("min_score", 0.4),
             )
+            return jsonify(results)
+
         except ValueError as ve:
             return jsonify({"error": str(ve)}), 400
         except Exception as e:
             logger.error(f"Search processing error: {str(e)}")
             return jsonify({"error": "Search processing failed"}), 500
-
-        return jsonify(results)
 
     except json.JSONDecodeError:
         return jsonify({"error": "Invalid JSON in request"}), 400
@@ -902,7 +976,7 @@ def search():
 
 @app.route("/health")
 def health():
-    """Health check endpoint"""
+    """Enhanced health check endpoint"""
     return jsonify(
         {
             "status": "healthy",
@@ -910,21 +984,38 @@ def health():
             "models_loaded": list(
                 search_service.embedding_manager.embedding_models.keys()
             ),
+            "cache_stats": {
+                "model_cache_size": len(search_service.model_cache.cache),
+                "query_cache_size": len(search_service.query_cache),
+            },
+            "preprocessed_fields": list(search_service.preprocessed_embeddings.keys()),
+            "embedding_device": str(search_service.embedding_manager.device),
         }
     )
 
 
+@app.route("/clear_cache", methods=["POST"])
+def clear_cache():
+    """Clear all caches endpoint"""
+    try:
+        search_service.query_cache.clear()
+        search_service.model_cache.cache.clear()
+        search_service.hybrid_search.reranker.cache.clear()
+        return jsonify({"status": "success", "message": "All caches cleared"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 def initialize_service():
-    """Initialize search service"""
-    logger.info("Initializing search service...")
+    """Initialize enhanced search service"""
+    logger.info("Initializing enhanced search service...")
 
     try:
-
+        # Initialize NLTK data
         nltk_data_dir = os.getenv("NLTK_DATA", "/app/cache/nltk_data")
         os.makedirs(nltk_data_dir, exist_ok=True)
         nltk.data.path.append(nltk_data_dir)
 
-        # Now download required NLTK data
         try:
             nltk.download("punkt", download_dir=nltk_data_dir)
             nltk.download("punkt_tab", download_dir=nltk_data_dir)
@@ -935,7 +1026,7 @@ def initialize_service():
         # Initialize search service
         search_service._initialize_required_models()
 
-        logger.info("Search service initialization completed successfully")
+        logger.info("Enhanced search service initialization completed successfully")
         return True
 
     except Exception as e:
@@ -948,4 +1039,4 @@ if __name__ == "__main__":
         logger.error("Failed to initialize service")
         exit(1)
 
-    app.run(host="0.0.0.0", port=AppConfig.SERVICE_PORT, debug=False)
+    app.run(host="0.0.0.0", port=AppConfig.SERVICE_PORT, debug=False, threaded=True)
