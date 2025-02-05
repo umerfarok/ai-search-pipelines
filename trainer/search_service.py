@@ -196,10 +196,12 @@ class EnhancedQueryUnderstanding:
             model="sentence-transformers/all-MiniLM-L6-v2",
             device=self.device,
         )
+        # Updated keyphrase extraction pipeline
         self.keyphrase_model = pipeline(
-            "keyphrase-extraction",
+            "token-classification",  # Changed task
             model="ml6team/keyphrase-extraction-distilbert-inspec",
             device=self.device,
+            aggregation_strategy="simple",  # Add aggregation for phrase grouping
         )
         try:
             self.nlp = spacy.load("en_core_web_sm")
@@ -223,10 +225,15 @@ class EnhancedQueryUnderstanding:
             return query
 
     def _extract_keyphrases(self, query: str) -> List[str]:
-        """Extract key phrases from query"""
         try:
-            return [kp["word"] for kp in self.keyphrase_model(query)]
-        except:
+            logger.debug(f"Processing query: {query}")
+            results = self.keyphrase_model(query)
+            logger.debug(f"Raw model output: {json.dumps(results, indent=2)}")
+            keyphrases = [result["word"].strip() for result in results]
+            logger.info(f"Extracted keyphrases: {keyphrases}")
+            return keyphrases
+        except Exception as e:
+            logger.error(f"Keyphrase extraction failure: {str(e)}")
             return []
 
     def _get_dynamic_categories(self, text: str) -> List[Dict[str, float]]:
