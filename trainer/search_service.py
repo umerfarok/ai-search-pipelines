@@ -494,8 +494,8 @@ class OptimizedHybridSearch:
     def initialize(self, texts: List[str], embeddings: np.ndarray) -> bool:
         """Initialize search engine with corpus and FAISS index"""
         try:
-            if not texts:
-                logger.error("Empty text corpus")
+            if not texts or not embeddings.size:
+                logger.error("Empty text corpus or embeddings")
                 return False
 
             # Initialize BM25
@@ -510,13 +510,23 @@ class OptimizedHybridSearch:
                     logger.warning(f"Error tokenizing document: {e}")
                     self.tokenized_corpus.append([])
 
+            # Validate tokenized corpus
+            if not any(self.tokenized_corpus):
+                logger.error("No valid tokenized documents for BM25")
+                return False
+
             self.bm25 = BM25Okapi(self.tokenized_corpus)
 
             # Initialize FAISS
             dim = embeddings.shape[1]
+            if dim <= 0:
+                logger.error("Invalid embedding dimension")
+                return False
+
             self.faiss_index = faiss.IndexFlatIP(dim)
             self.faiss_index.add(embeddings.astype("float32"))
 
+            logger.info("Search engine initialized successfully")
             return True
 
         except Exception as e:
@@ -539,6 +549,10 @@ class OptimizedHybridSearch:
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Perform hybrid search with FAISS and BM25"""
         try:
+            if self.faiss_index is None or self.bm25 is None:
+                logger.error("Search engine not initialized")
+                return np.array([]), np.array([])
+
             start_time = time.time()
 
             # First-stage FAISS search
@@ -634,16 +648,26 @@ class EnhancedSearchService:
         try:
             model_data = self.load_model(model_path)
             if not model_data:
+                logger.error(f"Failed to load model data from {model_path}")
+                return False
+
+            # Validate embeddings and texts
+            embeddings = model_data["embeddings"].astype("float32")
+            texts = self._get_searchable_texts(model_data["products"])
+
+            if not texts or not embeddings.size:
+                logger.error("Invalid model data: empty texts or embeddings")
                 return False
 
             # Initialize search engine
-            embeddings = model_data["embeddings"].astype("float32")
-            texts = self._get_searchable_texts(model_data["products"])
-            self.hybrid_search.initialize(texts, embeddings)
+            if not self.hybrid_search.initialize(texts, embeddings):
+                logger.error("Failed to initialize hybrid search engine")
+                return False
 
             # Preprocess field embeddings
             self._preprocess_field_embeddings(model_data["products"])
 
+            logger.info(f"Model {model_path} initialized successfully")
             return True
 
         except Exception as e:
