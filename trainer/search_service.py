@@ -518,73 +518,67 @@ class OptimizedHybridSearch:
             "specifications": 1.5,
         }
 
-    def initialize(self, texts: List[str], embeddings: np.ndarray) -> bool:
-        """Initialize search engine with improved validation and error handling"""
+    def _ensure_model_initialization(self, model_path: str) -> bool:
+        """Ensure model is properly initialized"""
         try:
-            if not texts or not isinstance(texts, list):
-                logger.error("Invalid text corpus")
+            if not self.model_cache.get(model_path):
+                logger.info(f"Initializing model {model_path}")
+                return self.initialize_model(model_path)
+            return True
+        except Exception as e:
+            logger.error(f"Model initialization check failed: {e}")
+            return False
+
+    def initialize_model(self, model_path: str) -> bool:
+        """Initialize model data and indices with improved validation and logging"""
+        try:
+            # Load model data
+            model_data = self.load_model(model_path)
+            if not model_data:
+                logger.error(f"Failed to load model data from {model_path}")
                 return False
 
-            if embeddings is None or not isinstance(embeddings, np.ndarray):
+            # Validate products dataframe
+            products_df = model_data.get("products")
+            if (
+                products_df is None
+                or not isinstance(products_df, pd.DataFrame)
+                or products_df.empty
+            ):
+                logger.error("Invalid or empty products dataframe")
+                return False
+
+            # Validate embeddings
+            embeddings = model_data.get("embeddings")
+            if (
+                embeddings is None
+                or not isinstance(embeddings, np.ndarray)
+                or embeddings.size == 0
+            ):
                 logger.error("Invalid embeddings data")
                 return False
 
-            # Initialize BM25
-            self.tokenized_corpus = []
-            valid_docs = False
-
-            for text in texts:
-                try:
-                    if not isinstance(text, str):
-                        text = str(text)
-                    tokenized = word_tokenize(text.lower())
-                    if tokenized:
-                        valid_docs = True
-                        self.tokenized_corpus.append(tokenized)
-                    else:
-                        self.tokenized_corpus.append([])
-                except Exception as e:
-                    logger.warning(f"Error tokenizing document: {e}")
-                    self.tokenized_corpus.append([])
-
-            if not valid_docs:
-                logger.error("No valid documents for BM25")
+            # Generate searchable texts
+            texts = self._get_searchable_texts(products_df)
+            if not texts:
+                logger.error("No valid searchable texts generated")
                 return False
 
-            try:
-                self.bm25 = BM25Okapi(self.tokenized_corpus)
-            except Exception as e:
-                logger.error(f"BM25 initialization failed: {e}")
+            logger.info(f"Generated {len(texts)} searchable texts")
+
+            # Initialize hybrid search
+            if not self.hybrid_search.initialize(texts, embeddings):
+                logger.error("Failed to initialize hybrid search engine")
                 return False
 
-            # Initialize FAISS
-            try:
-                dim = embeddings.shape[1]
-                self.faiss_index = faiss.IndexFlatIP(dim)
+            # Cache the model data
+            self.model_cache.put(model_path, model_data)
 
-                # Convert embeddings to float32 and handle NaN values
-                embeddings_float32 = embeddings.astype("float32")
-                if np.isnan(embeddings_float32).any():
-                    logger.error("NaN values found in embeddings")
-                    return False
-
-                self.faiss_index.add(embeddings_float32)
-
-                if self.faiss_index.ntotal == 0:
-                    logger.error("FAISS index is empty after initialization")
-                    return False
-
-            except Exception as e:
-                logger.error(f"FAISS initialization failed: {e}")
-                return False
-
-            logger.info(
-                f"Search engine initialized successfully with {len(texts)} documents"
-            )
+            logger.info(f"Model {model_path} initialized successfully")
             return True
 
         except Exception as e:
-            logger.error(f"Search engine initialization failed: {str(e)}")
+            logger.error(f"Model initialization failed: {str(e)}")
             return False
 
     def _exact_match_boost(self, candidate: Dict, query_terms: List[str]) -> float:
@@ -773,16 +767,16 @@ class EnhancedSearchService:
                         except Exception as e:
                             logger.warning(f"Error processing field {field}: {e}")
                             continue
-                
+
                 if text_parts:  # Only add if we have valid text parts
                     texts.append(" ".join(text_parts))
                 else:
                     logger.warning(f"No valid text parts found for row {_}")
-            
+
             if not texts:
                 logger.error("No valid searchable texts generated")
                 return []
-                
+
             return texts
         except Exception as e:
             logger.error(f"Error generating searchable texts: {e}")
@@ -977,23 +971,34 @@ class EnhancedSearchService:
         max_items: int = 10,
         min_score: float = 0.4,
     ) -> Dict:
-        """Perform enhanced search with optimizations"""
+        """Perform enhanced search with proper initialization checks"""
         try:
             start_time = time.time()
 
-            # Check cache
-            cache_key = f"{model_path}_{query}_{max_items}"
-            if cached := self.query_cache.get(cache_key):
-                return cached
-
-            # Load model data
-            model_data = self.load_model(model_path)
+            # Check if model is initialized
+            model_data = self.model_cache.get(model_path)
             if not model_data:
-                raise ValueError(f"Failed to load model from {model_path}")
+                logger.info(f"Model {model_path} not found in cache. Initializing...")
+                if not self.initialize_model(model_path):
+                    raise ValueError(f"Failed to initialize model {model_path}")
+                model_data = self.model_cache.get(model_path)
+                if not model_data:
+                    raise ValueError(f"Model {model_path} initialization failed")
+
+            # Check if hybrid search is initialized
+            if (
+                not hasattr(self.hybrid_search, "bm25")
+                or self.hybrid_search.bm25 is None
+            ):
+                logger.info("Hybrid search not initialized. Reinitializing...")
+                texts = self._get_searchable_texts(model_data["products"])
+                if not self.hybrid_search.initialize(texts, model_data["embeddings"]):
+                    raise ValueError("Failed to initialize hybrid search")
 
             # Analyze query
             query_analysis = self.query_understanding.analyze(query, context)
             self.current_query_analysis = query_analysis
+            logger.info(f"Query analysis completed: {query_analysis}")
 
             # Generate query embedding
             query_embed = self.embedding_manager.generate_embedding([query])[0]
@@ -1006,24 +1011,43 @@ class EnhancedSearchService:
                 k=max_items * 2,
             )
 
+            if len(indices) == 0:
+                logger.warning("No results found from hybrid search")
+                return {
+                    "results": [],
+                    "total": 0,
+                    "query_info": {
+                        "original": query,
+                        "analysis": query_analysis,
+                        "timing": {"total_time": time.time() - start_time},
+                        "message": "No results found",
+                    },
+                }
+
             # Process candidates
             candidates = []
             for idx, score in zip(indices, scores):
                 if score >= min_score:
-                    candidate = self._process_candidate(
-                        model_data["products"].iloc[idx],
-                        score,
-                        model_data["metadata"]["schema_mapping"],
-                    )
-                    if candidate:
-                        candidate["field_matches"] = self._find_field_matches(
-                            query, candidate
+                    try:
+                        candidate = self._process_candidate(
+                            model_data["products"].iloc[idx],
+                            score,
+                            model_data["metadata"]["schema_mapping"],
                         )
-                        candidates.append(candidate)
+                        if candidate:
+                            candidate["field_matches"] = self._find_field_matches(
+                                query, candidate
+                            )
+                            candidates.append(candidate)
+                    except Exception as e:
+                        logger.error(f"Error processing candidate {idx}: {e}")
+                        continue
 
             # Rerank results
-            reranked_results = self.hybrid_search.reranker.rerank(
-                query, candidates, max_items
+            reranked_results = (
+                self.hybrid_search.reranker.rerank(query, candidates, max_items)
+                if candidates
+                else []
             )
 
             # Prepare response
@@ -1041,14 +1065,19 @@ class EnhancedSearchService:
                 },
             }
 
-            # Cache results
-            self.query_cache[cache_key] = results
-
             return results
 
         except Exception as e:
-            logger.error(f"Search error: {str(e)}")
-            return {"error": str(e)}
+            logger.error(f"Search error: {str(e)}", exc_info=True)
+            return {
+                "error": str(e),
+                "results": [],
+                "total": 0,
+                "query_info": {
+                    "original": query,
+                    "timing": {"total_time": time.time() - start_time},
+                },
+            }
 
 
 # Initialize service
