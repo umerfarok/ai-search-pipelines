@@ -1,7 +1,6 @@
 """
 Enhanced Search Service with Dynamic Query Understanding and Context Extraction
 """
-
 # Tested and working on local machine and vM
 import os
 import logging
@@ -25,7 +24,6 @@ from transformers import pipeline
 import json
 import spacy
 from config import AppConfig
-from spelling_corrector import SpellingCorrector
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -61,13 +59,6 @@ class DynamicQueryUnderstanding:
         except OSError:
             spacy.cli.download("en_core_web_sm")
             self.nlp = spacy.load("en_core_web_sm")
-
-        # Initialize spelling corrector
-        self.spelling_corrector = SpellingCorrector()
-
-    def initialize_spelling_corrector(self, custom_vocabulary: List[str] = None):
-        """Initialize spelling corrector with domain-specific vocabulary"""
-        self.spelling_corrector.initialize(custom_vocabulary)
 
     def _get_dynamic_categories(self, text: str) -> List[Dict[str, float]]:
         """Dynamically extract categories from text"""
@@ -129,13 +120,11 @@ class DynamicQueryUnderstanding:
             self.sentiment_analyzer = pipeline(
                 "sentiment-analysis",
                 model="distilbert/distilbert-base-uncased-finetuned-sst-2-english",
-                device=self.device,
+                device=self.device
             )
         try:
             result = self.sentiment_analyzer(text[:512])[0]  # Truncate to max length
-            return (
-                result["score"] if result["label"] == "POSITIVE" else -result["score"]
-            )
+            return result["score"] if result["label"] == "POSITIVE" else -result["score"]
         except Exception as e:
             logger.error(f"Sentiment analysis failed: {e}")
             return 0.0
@@ -155,28 +144,18 @@ class DynamicQueryUnderstanding:
         }
 
     def analyze(self, query: str, context: Optional[Dict] = None) -> Dict:
-        """Comprehensive query analysis with spelling correction"""
+        """Comprehensive query analysis with cleaned response"""
         try:
-            # Perform spelling correction
-            corrected_query, spelling_info = self.spelling_corrector.correct_spelling(
-                query
-            )
-
-            # Get categories using corrected query
-            categories = self._get_dynamic_categories(corrected_query)
-            expanded_terms = self._expand_query(corrected_query)
-            semantic_features = self._extract_semantic_features(corrected_query)
-
-            # Get intent using corrected query
+            categories = self._get_dynamic_categories(query)
+            expanded_terms = self._expand_query(query)
+            semantic_features = self._extract_semantic_features(query)
             intent_labels = ["search", "compare", "explore", "purchase", "learn"]
             intent_results = self.zero_shot(
-                corrected_query, candidate_labels=intent_labels, multi_label=True
+                query, candidate_labels=intent_labels, multi_label=True
             )
 
             understanding = {
                 "original_query": query,
-                "spelling_correction": spelling_info,
-                "corrected_query": corrected_query,
                 "categories": categories,
                 "expanded_terms": expanded_terms,
                 "semantic_features": semantic_features,
@@ -187,10 +166,7 @@ class DynamicQueryUnderstanding:
             }
 
             if context:
-                understanding["context"] = self._analyze_context(
-                    corrected_query, context
-                )
-
+                understanding["context"] = self._analyze_context(query, context)
             return understanding
 
         except Exception as e:
@@ -653,50 +629,14 @@ class SearchService:
         self.current_query_analysis = {}
         self._initialize_required_models()
 
-    def _load_domain_vocabulary(self) -> List[str]:
-        """Load domain-specific vocabulary for spelling correction"""
-        try:
-            vocab_set = set()
-
-            # Load from products data if available
-            products_df = self._load_products(AppConfig.DEFAULT_MODEL_PATH)
-            if products_df is not None:
-                # Extract words from relevant columns
-                text_columns = ["name", "description", "category"]
-                for col in text_columns:
-                    if col in products_df.columns:
-                        words = " ".join(products_df[col].astype(str)).lower().split()
-                        vocab_set.update(words)
-
-            # Add any additional domain-specific terms
-            if hasattr(AppConfig, "DOMAIN_VOCABULARY"):
-                vocab_set.update(AppConfig.DOMAIN_VOCABULARY)
-
-            return list(vocab_set)
-        except Exception as e:
-            logger.error(f"Error loading domain vocabulary: {e}")
-            return []
-
     def _initialize_required_models(self):
-        """Preload required models and initialize spelling correction"""
+        """Preload required models from config"""
         try:
-            # Preload models from config
             for model_key in AppConfig.REQUIRED_MODELS:
                 self.embedding_manager.get_model(model_key)
-
-            # Initialize spelling correction with domain vocabulary
-            custom_vocab = self._load_domain_vocabulary()
-            self.hybrid_search.query_understanding.initialize_spelling_corrector(
-                custom_vocab
-            )
-
-            logger.info(
-                "Successfully preloaded required models and initialized spelling correction"
-            )
+            logger.info("Successfully preloaded required models")
         except Exception as e:
-            logger.error(
-                f"Error preloading models and initializing spelling correction: {e}"
-            )
+            logger.error(f"Error preloading models: {e}")
 
     def _load_products(self, model_path: str) -> Optional[pd.DataFrame]:
         """Load products data from local or S3"""
@@ -988,7 +928,6 @@ def initialize_service():
         try:
             nltk.download("punkt", download_dir=nltk_data_dir)
             nltk.download("punkt_tab", download_dir=nltk_data_dir)
-            nltk.download('words', download_dir=nltk_data_dir)
         except Exception as e:
             logger.error(f"Failed to download NLTK data: {e}")
             return False

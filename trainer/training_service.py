@@ -1002,8 +1002,6 @@ def initialize_service():
     """Initialize all service components"""
     logger.info("Initializing service...")
 
-    # Setup cache directories
-    AppConfig.setup_cache_dirs()
 
     # Initialize models
     if not model_manager.initialize_all():
@@ -1014,7 +1012,7 @@ def initialize_service():
     worker.start()
 
     logger.info("Service initialization completed")
-    return True
+    return True 
 
 
 if __name__ == "__main__":

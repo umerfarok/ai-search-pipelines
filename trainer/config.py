@@ -5,13 +5,14 @@ import os
 @dataclass
 class AppConfig:
     # Redis Configuration
+    MIN_SCORE_THRESHOLD = 0.4
     REDIS_HOST: str = os.getenv("REDIS_HOST", "redis")
     REDIS_PORT: int = int(os.getenv("REDIS_PORT", 6379))
     REDIS_PASSWORD: str = os.getenv("REDIS_PASSWORD", "")
     TRAINING_QUEUE: str = "training_queue"
     MODEL_STATUS_PREFIX: str = "model_status:"
     REQUIRED_MODELS = ["BAAI/bge-large-en-v1.5"]
-    HF_TOKEN = os.getenv("HF_TOKEN", "hfghjkjjkgfdsa")
+    HF_TOKEN = os.getenv("HF_TOKEN", "sdfghjfds")
     API_HOST: str = os.getenv("API_HOST", "http://api:8080")
 
     # Service Configuration
@@ -23,7 +24,7 @@ class AppConfig:
     AWS_SECRET_KEY: str = os.getenv("AWS_SECRET_KEY", "test")
     S3_BUCKET: str = os.getenv("S3_BUCKET","local-bucket")
     S3_REGION: str = os.getenv("AWS_REGION", "us-east-1")
-    AWS_SSL_VERIFY: str = os.getenv("AWS_SSL_VERIFY", "true")
+    AWS_SSL_VERIFY: str = os.getenv("AWS_SSL_VERIFY", "false")
     AWS_ENDPOINT_URL: str = os.getenv("AWS_ENDPOINT_URL", "http://localstack:4566")
 
     # Retry Configuration
@@ -186,43 +187,7 @@ class AppConfig:
             "passport",
             "visa",
             "adventure",
-        ],
-        "sports": [
-            "football",
-            "basketball",
-            "tennis",
-            "cricket",
-            "golf",
-            "swimming",
-            "athletics",
-            "coach",
-            "team",
-            "tournament",
-        ],
-        "entertainment": [
-            "movie",
-            "music",
-            "concert",
-            "theater",
-            "game",
-            "festival",
-            "celebrity",
-            "show",
-            "album",
-            "ticket",
-        ],
-        "fashion": [
-            "clothing",
-            "style",
-            "trend",
-            "designer",
-            "accessory",
-            "outfit",
-            "brand",
-            "model",
-            "runway",
-            "boutique",
-        ],
+        ]
     }
 
     @classmethod

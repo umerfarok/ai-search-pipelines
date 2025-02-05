@@ -1,42 +1,31 @@
 ARG BASE_IMAGE=ml-base:latest
 FROM ${BASE_IMAGE} as base
 
-# Create app user with flexible UID/GID
-ARG USER_ID=1000
-ARG GROUP_ID=1000
-
-RUN groupadd -g ${GROUP_ID} appuser && \
-    useradd -u ${USER_ID} -g appuser -m -s /bin/bash appuser
-
-# Create and set permissions for all required directories
-RUN mkdir -p /app/{models,model_cache,s3_cache} && \
-    mkdir -p /app/model_cache/{transformers,huggingface} && \
-    mkdir -p /app/model_cache/huggingface/datasets && \
-    mkdir -p /app/shared_models && \
-    chown -R appuser:appuser /app && \
-    chmod -R 755 /app
+# Create directories without user permissions
+RUN mkdir -p /app/cache/{transformers,huggingface,datasets,torch,models,nltk_data} && \
+    mkdir -p /app/shared_models
 
 RUN pip3 uninstall numpy -y
 
 # Install dependencies
-COPY --chown=appuser:appuser requirements.service.txt .
+COPY . .
 RUN pip3 install --no-cache-dir -r requirements.service.txt && \
     python -m spacy validate
 
-# Switch to appuser and set up cache directories
-USER appuser
 WORKDIR /app
 
 # Set cache environment variables
-ENV TRANSFORMERS_CACHE="/app/model_cache/transformers" \
-    HF_HOME="/app/model_cache/huggingface" \
-    TORCH_HOME="/app/model_cache" \
-    XDG_CACHE_HOME="/app/model_cache"
+ENV TRANSFORMERS_CACHE="/app/cache/transformers" \
+    HF_HOME="/app/cache/huggingface" \
+    TORCH_HOME="/app/cache/torch" \
+    XDG_CACHE_HOME="/app/cache" \
+    HF_DATASETS_CACHE="/app/cache/datasets" \
+    MODEL_CACHE_DIR="/app/cache/models" \
+    NLTK_DATA="/app/cache/nltk_data"
 
 # Copy application files
 FROM base as prod
-COPY --chown=appuser:appuser . .
+COPY . .
 
-USER appuser
 CMD ["python3", "app.py"]
 

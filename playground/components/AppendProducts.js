@@ -9,10 +9,10 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
 const TabButton = ({ active, onClick, icon: Icon, children }) => (
     <button
         onClick={onClick}
-        className={`flex items-center px-4 py-2 rounded-lg ${
+        className={`flex items-center px-4 py-2 rounded-lg transition-colors ${
             active 
-                ? 'bg-blue-100 text-blue-700 font-medium' 
-                : 'text-gray-600 hover:bg-gray-100'
+                ? 'bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-400 font-medium' 
+                : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
         }`}
     >
         <Icon className="w-4 h-4 mr-2" />
@@ -59,11 +59,13 @@ const CSVDropzone = ({ onCSVParse, expectedHeaders }) => {
         <div 
             {...getRootProps()} 
             className={`border-2 border-dashed p-8 rounded-lg text-center cursor-pointer transition-colors
-                ${isDragActive ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-gray-400'}`}
+                ${isDragActive 
+                    ? 'border-blue-500 bg-blue-50 dark:border-blue-400 dark:bg-blue-900/20' 
+                    : 'border-gray-300 dark:border-gray-700 hover:border-gray-400 dark:hover:border-gray-600'}`}
         >
             <input {...getInputProps()} />
-            <Upload className="mx-auto h-12 w-12 text-gray-400" />
-            <p className="mt-2 text-sm text-gray-600">
+            <Upload className="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" />
+            <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">
                 {isDragActive ? 'Drop the CSV file here' : 'Drag & drop a CSV file, or click to select'}
             </p>
         </div>
@@ -83,30 +85,30 @@ const DataPreview = ({ data, schema, onRemoveRow }) => {
 
     return (
         <div className="mt-6 overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
+            <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                <thead className="bg-gray-50 dark:bg-gray-800">
                     <tr>
                         {columns.map(col => (
                             <th key={col} 
-                                className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                                 {col}
                             </th>
                         ))}
                         <th className="px-6 py-3 text-right">Actions</th>
                     </tr>
                 </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
+                <tbody className="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
                     {data.map((row, idx) => (
-                        <tr key={idx} className="hover:bg-gray-50">
+                        <tr key={idx} className="hover:bg-gray-50 dark:hover:bg-gray-800">
                             {columns.map(col => (
-                                <td key={col} className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                <td key={col} className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                                     {row[col] || '-'}
                                 </td>
                             ))}
                             <td className="px-6 py-4 text-right">
                                 <button 
                                     onClick={() => onRemoveRow(idx)}
-                                    className="text-red-600 hover:text-red-900"
+                                    className="text-red-600 dark:text-red-400 hover:text-red-900 dark:hover:text-red-300"
                                 >
                                     <Trash2 className="h-4 w-4" />
                                 </button>
@@ -124,26 +126,28 @@ const ModelCard = ({ model, onSelect, isSelected }) => {
         <div
             onClick={() => onSelect(model)}
             className={`p-4 border rounded-lg cursor-pointer transition-colors ${
-                isSelected ? 'ring-2 ring-blue-500 bg-blue-50' : 'hover:bg-gray-50'
-            }`}
+                isSelected 
+                    ? 'ring-2 ring-blue-500 bg-blue-50 dark:bg-blue-900/50 dark:ring-blue-400' 
+                    : 'hover:bg-gray-50 dark:hover:bg-gray-800 border-gray-200 dark:border-gray-700'
+            } bg-white dark:bg-gray-800`}
         >
             <div className="flex justify-between items-center mb-2">
-                <h3 className="font-semibold">{model.name}</h3>
+                <h3 className="font-semibold text-gray-900 dark:text-gray-100">{model.name}</h3>
                 <span className={`px-2 py-1 rounded-full text-xs font-medium
                     ${model.status === 'completed' 
-                        ? 'bg-green-100 text-green-800' 
-                        : 'bg-gray-100 text-gray-800'
+                        ? 'bg-green-100 dark:bg-green-900/50 text-green-800 dark:text-green-400' 
+                        : 'bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-400'
                     }`}
                 >
                     {model.status}
                 </span>
             </div>
-            <p className="text-sm text-gray-600 mb-2">{model.description}</p>
+            <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">{model.description}</p>
             <div className="flex flex-wrap gap-2 text-xs">
-                <span className="px-2 py-1 bg-gray-100 rounded-full">
+                <span className="px-2 py-1 bg-gray-100 dark:bg-gray-800 rounded-full text-gray-600 dark:text-gray-400">
                     {model.training_stats?.processed_records || 0} products
                 </span>
-                <span className="px-2 py-1 bg-gray-100 rounded-full">
+                <span className="px-2 py-1 bg-gray-100 dark:bg-gray-800 rounded-full text-gray-600 dark:text-gray-400">
                     {new Date(model.created_at).toLocaleDateString()}
                 </span>
             </div>
@@ -360,7 +364,7 @@ export default function AppendProducts() {
         ].filter(Boolean);
     };
 
-    // Add effect to reset form when model changes
+
     useEffect(() => {
         if (selectedModel) {
             setProducts([{}]);  // Reset products
@@ -380,17 +384,17 @@ export default function AppendProducts() {
     return (
         <div className="max-w-7xl mx-auto p-6 space-y-8">
             {/* Title */}
-            <h1 className="text-2xl font-bold text-gray-900">Append Products</h1>
+            <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Append Products</h1>
 
             {/* Messages */}
             {error && (
-                <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-center text-red-700">
+                <div className="bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg p-4 flex items-center text-red-700 dark:text-red-400">
                     <AlertCircle className="h-4 w-4 mr-2" />
                     <p>{error}</p>
                 </div>
             )}
             {success && (
-                <div className="bg-green-50 border border-green-200 rounded-lg p-4 flex items-center text-green-700">
+                <div className="bg-green-50 dark:bg-green-900/30 border border-green-200 dark:border-green-800 rounded-lg p-4 flex items-center text-green-700 dark:text-green-400">
                     <CheckCircle2 className="h-4 w-4 mr-2" />
                     <p>{success}</p>
                 </div>
@@ -400,7 +404,7 @@ export default function AppendProducts() {
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 {/* Model Selection - Left Column */}
                 <div className="space-y-4">
-                    <h2 className="text-lg font-semibold">Select Model</h2>
+                    <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Select Model</h2>
                     <div className="space-y-4">
                         {models.map(model => (
                             <ModelCard
@@ -416,7 +420,7 @@ export default function AppendProducts() {
                 {/* Right Column - Product Addition */}
                 <div className="md:col-span-2">
                     {selectedModel ? (
-                        <div className="bg-white border border-gray-200 rounded-lg p-6">
+                        <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-6">
                             {/* Tab Selection */}
                             <div className="flex space-x-4 mb-6">
                                 <TabButton
@@ -456,7 +460,9 @@ export default function AppendProducts() {
                             <button
                                 onClick={handleSubmit}
                                 disabled={isSubmitting || (activeTab === 'manual' ? products.length === 0 : !csvFile)}
-                                className="mt-6 w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center"
+                                className="mt-6 w-full px-4 py-2 bg-blue-600 dark:bg-blue-500 text-white rounded-lg
+                                         hover:bg-blue-700 dark:hover:bg-blue-600 disabled:opacity-50 
+                                         flex items-center justify-center transition-colors"
                             >
                                 {isSubmitting ? (
                                     <>
@@ -469,7 +475,7 @@ export default function AppendProducts() {
                             </button>
                         </div>
                     ) : (
-                        <div className="bg-white border border-gray-200 rounded-lg p-6 text-center text-gray-500">
+                        <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-6 text-center text-gray-500 dark:text-gray-400">
                             Please select a model from the left to append products
                         </div>
                     )}

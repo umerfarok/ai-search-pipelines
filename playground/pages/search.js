@@ -121,30 +121,35 @@ const ModelList = ({ models, selectedModel, onSelect }) => {
     };
 
     return (
-        <div className="border rounded-lg overflow-hidden">
-            <div className="bg-gray-50 px-4 py-2 border-b">
-                <h3 className="font-semibold">Available Models</h3>
+        <div className="border dark:border-gray-700 rounded-lg overflow-hidden bg-white dark:bg-gray-800">
+            <div className="bg-gray-50 dark:bg-gray-800 px-4 py-2 border-b dark:border-gray-700">
+                <h3 className="font-semibold text-gray-900 dark:text-gray-100">Available Models</h3>
             </div>
-            <div className="divide-y">
+            <div className="divide-y dark:divide-gray-700">
                 {models.map(model => (
                     <div
                         key={model._id}
                         onClick={() => onSelect(model)}
-                        className={`p-4 cursor-pointer hover:bg-gray-50 transition-colors ${selectedModel?._id === model._id ? 'bg-blue-50' : ''
-                            } ${model.status !== 'completed' ? 'opacity-50 cursor-not-allowed' : ''
+                        className={`p-4 cursor-pointer transition-colors
+                            ${selectedModel?._id === model._id 
+                                ? 'bg-blue-50 dark:bg-blue-900/50' 
+                                : 'hover:bg-gray-50 dark:hover:bg-gray-700'
+                            } ${model.status !== 'completed' 
+                                ? 'opacity-50 cursor-not-allowed' 
+                                : ''
                             }`}
                         title={model.status !== 'completed' ? 'Only completed models can be used for searching' : ''}
                     >
                         <div className="flex justify-between items-center">
                             <div>
-                                <h4 className="font-medium">{model.name}</h4>
-                                <p className="text-sm text-gray-600">{model.description}</p>
+                                <h4 className="font-medium text-gray-900 dark:text-gray-100">{model.name}</h4>
+                                <p className="text-sm text-gray-600 dark:text-gray-400">{model.description}</p>
                             </div>
                             {selectedModel?._id === model._id && (
                                 <CheckCircle2 className="h-5 w-5 text-blue-500" />
                             )}
                         </div>
-                        <div className="text-xs text-gray-500 mt-2">
+                        <div className="text-xs text-gray-500 dark:text-gray-400 mt-2">
                             Created: {new Date(model.created_at).toLocaleString()}
                         </div>
                         <div className="flex items-center gap-2 mt-2">
@@ -195,8 +200,8 @@ const FilterPanel = ({ model, activeFilters, onFilterChange }) => {
     };
 
     return (
-        <div className="border rounded-lg p-4 space-y-4">
-            <h3 className="font-semibold flex items-center gap-2">
+        <div className="border dark:border-gray-700 rounded-lg p-4 space-y-4 bg-white dark:bg-gray-800">
+            <h3 className="font-semibold text-gray-900 dark:text-gray-100 flex items-center gap-2">
                 <Filter className="h-4 w-4" />
                 Filters
             </h3>
@@ -204,34 +209,37 @@ const FilterPanel = ({ model, activeFilters, onFilterChange }) => {
             {/* Category Filter */}
             {schema_mapping.category_column && (
                 <div>
-                    <label className="text-sm font-medium">Category</label>
+                    <label className="text-sm font-medium text-gray-700 dark:text-gray-300">Category</label>
                     <input
                         type="text"
                         value={categoryFilter}
                         onChange={e => setCategoryFilter(e.target.value)}
                         placeholder="Filter by category"
-                        className="w-full mt-1 p-2 border rounded"
+                        className="w-full mt-1 p-2 border dark:border-gray-700 rounded bg-white dark:bg-gray-900 
+                                 text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400"
                     />
                 </div>
             )}
 
             {/* Price Range Filter */}
             <div>
-                <label className="text-sm font-medium">Price Range</label>
+                <label className="text-sm font-medium text-gray-700 dark:text-gray-300">Price Range</label>
                 <div className="flex gap-2 mt-1">
                     <input
                         type="number"
                         value={priceRange.min}
                         onChange={e => setPriceRange(prev => ({ ...prev, min: e.target.value }))}
                         placeholder="Min"
-                        className="w-1/2 p-2 border rounded"
+                        className="w-1/2 p-2 border dark:border-gray-700 rounded bg-white dark:bg-gray-900 
+                                 text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400"
                     />
                     <input
                         type="number"
                         value={priceRange.max}
                         onChange={e => setPriceRange(prev => ({ ...prev, max: e.target.value }))}
                         placeholder="Max"
-                        className="w-1/2 p-2 border rounded"
+                        className="w-1/2 p-2 border dark:border-gray-700 rounded bg-white dark:bg-gray-900 
+                                 text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400"
                     />
                 </div>
             </div>
@@ -239,7 +247,7 @@ const FilterPanel = ({ model, activeFilters, onFilterChange }) => {
             {/* Custom Column Filters */}
             {schema_mapping.custom_columns?.map(column => (
                 <div key={column.standard_column}>
-                    <label className="text-sm font-medium">
+                    <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
                         {column.standard_column}
                     </label>
                     <input
@@ -250,14 +258,16 @@ const FilterPanel = ({ model, activeFilters, onFilterChange }) => {
                             [column.standard_column]: e.target.value
                         }))}
                         placeholder={`Filter by ${column.standard_column}`}
-                        className="w-full mt-1 p-2 border rounded"
+                        className="w-full mt-1 p-2 border dark:border-gray-700 rounded bg-white dark:bg-gray-900 
+                                 text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400"
                     />
                 </div>
             ))}
 
             <button
                 onClick={handleFilterApply}
-                className="w-full px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
+                className="w-full px-4 py-2 bg-blue-600 dark:bg-blue-500 text-white rounded 
+                         hover:bg-blue-700 dark:hover:bg-blue-600 transition-colors"
             >
                 Apply Filters
             </button>
@@ -269,15 +279,16 @@ const SearchResults = ({ results, naturalResponse, queryInfo, currentPage, total
     <div className="space-y-6">
         {/* Natural Language Response */}
         {naturalResponse && (
-            <div className="bg-blue-50 border border-blue-100 rounded-lg p-4 mb-4">
-                <h3 className="text-sm font-semibold text-blue-800 mb-2">AI Response:</h3>
-                <p className="text-gray-700">{naturalResponse}</p>
+            <div className="bg-blue-50 dark:bg-blue-900/30 border border-blue-100 dark:border-blue-800 
+                         rounded-lg p-4 mb-4">
+                <h3 className="text-sm font-semibold text-blue-800 dark:text-blue-300 mb-2">AI Response:</h3>
+                <p className="text-gray-700 dark:text-gray-300">{naturalResponse}</p>
             </div>
         )}
 
         {/* Query Info */}
         {queryInfo && (
-            <div className="text-sm text-gray-500 mb-4">
+            <div className="text-sm text-gray-500 dark:text-gray-400 mb-4">
                 <span>Original Query: {queryInfo.original}</span>
                 <span className="mx-2">•</span>
                 <span>Model: {queryInfo.model_path}</span>
@@ -286,32 +297,33 @@ const SearchResults = ({ results, naturalResponse, queryInfo, currentPage, total
 
         {/* Results */}
         {results.map((result, index) => (
-            <div key={index} className="border rounded-lg p-4 hover:shadow-md transition-shadow bg-white">
+            <div key={index} className="border dark:border-gray-700 rounded-lg p-4 
+                                    hover:shadow-md transition-shadow bg-white dark:bg-gray-800">
                 <div className="flex justify-between items-start">
                     <div>
-                        <h3 className="font-semibold text-lg">{result.name}</h3>
-                        <p className="text-gray-600 mt-1">{result.description}</p>
+                        <h3 className="font-semibold text-lg text-gray-900 dark:text-gray-100">{result.name}</h3>
+                        <p className="text-gray-600 dark:text-gray-400 mt-1">{result.description}</p>
                     </div>
                     <div className="flex flex-col items-end">
-                        <span className="bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded-full">
+                        <span className="bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-300 text-xs px-2 py-1 rounded-full">
                             {(result.score * 100).toFixed(1)}% match
                         </span>
-                        <span className="text-xs text-gray-500 mt-1">ID: {result.id}</span>
+                        <span className="text-xs text-gray-500 dark:text-gray-400 mt-1">ID: {result.id}</span>
                     </div>
                 </div>
 
-                <div className="mt-3 pt-3 border-t">
+                <div className="mt-3 pt-3 border-t dark:border-gray-700">
                     <div className="grid grid-cols-2 gap-4">
                         <div>
-                            <span className="text-sm text-gray-500">Category:</span>
-                            <span className="ml-2 text-sm font-medium">{result.category}</span>
+                            <span className="text-sm text-gray-500 dark:text-gray-400">Category:</span>
+                            <span className="ml-2 text-sm font-medium text-gray-900 dark:text-gray-100">{result.category}</span>
                         </div>
 
                         {/* Metadata fields */}
                         {Object.entries(result.metadata || {}).map(([key, value]) => (
                             <div key={key}>
-                                <span className="text-sm text-gray-500">{key}:</span>
-                                <span className="ml-2 text-sm font-medium">{value}</span>
+                                <span className="text-sm text-gray-500 dark:text-gray-400">{key}:</span>
+                                <span className="ml-2 text-sm font-medium text-gray-900 dark:text-gray-100">{value}</span>
                             </div>
                         ))}
                     </div>
@@ -325,17 +337,19 @@ const SearchResults = ({ results, naturalResponse, queryInfo, currentPage, total
                 <button
                     onClick={() => onPageChange(currentPage - 1)}
                     disabled={currentPage === 1}
-                    className="p-2 bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-50"
+                    className="p-2 bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 
+                             dark:hover:bg-gray-700 disabled:opacity-50"
                 >
                     <ChevronLeft className="h-4 w-4" />
                 </button>
-                <span className="text-sm text-gray-600">
+                <span className="text-sm text-gray-600 dark:text-gray-400">
                     Page {currentPage} of {totalPages}
                 </span>
                 <button
                     onClick={() => onPageChange(currentPage + 1)}
                     disabled={currentPage === totalPages}
-                    className="p-2 bg-gray-100 rounded hover:bg-gray-200 disabled:opacity-50"
+                    className="p-2 bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 
+                             dark:hover:bg-gray-700 disabled:opacity-50"
                 >
                     <ChevronRight className="h-4 w-4" />
                 </button>
@@ -424,8 +438,8 @@ export default function ModelSearchComponent() {
     }
 
     return (
-        <div className="max-w-7xl mx-auto p-6">
-            <h1 className="text-2xl font-bold mb-6">Product Search</h1>
+        <div className="max-w-7xl mx-auto p-6 bg-white dark:bg-gray-900">
+            <h1 className="text-2xl font-bold mb-6 text-gray-900 dark:text-gray-100">Product Search</h1>
 
             <div className="grid grid-cols-12 gap-6">
                 {/* Model Selection */}
@@ -447,13 +461,17 @@ export default function ModelSearchComponent() {
                                 value={searchQuery}
                                 onChange={(e) => setSearchQuery(e.target.value)}
                                 placeholder="Enter search query..."
-                                className="flex-1 p-2 border rounded focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                                className="flex-1 p-2 border dark:border-gray-700 rounded bg-white dark:bg-gray-900 
+                                         text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400
+                                         focus:ring-2 focus:ring-blue-500 focus:outline-none"
                                 disabled={!selectedModel || selectedModel.status !== 'completed'}
                             />
                             <button
                                 type="submit"
                                 disabled={!selectedModel || !searchQuery || searching || selectedModel.status !== 'completed'}
-                                className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50 flex items-center gap-2"
+                                className="px-4 py-2 bg-blue-600 dark:bg-blue-500 text-white rounded 
+                                         hover:bg-blue-700 dark:hover:bg-blue-600 disabled:opacity-50 
+                                         flex items-center gap-2 transition-colors"
                             >
                                 {searching ? (
                                     <Loader2 className="h-4 w-4 animate-spin" />

@@ -5,6 +5,8 @@ from transformers import pipeline
 import spacy
 from tqdm import tqdm
 from config import AppConfig
+import os
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +17,7 @@ class ModelInitializer:
         self.nlp = None
         self.reranker = None
         self.intent_classifier = None
+        self._ensure_cache_directories()
 
     def initialize_all(self):
         """Initialize all required models"""
@@ -139,3 +142,18 @@ class ModelInitializer:
         if not self.intent_classifier:
             self._init_intent_classifier()
         return self.intent_classifier
+
+    def _ensure_cache_directories(self):
+        """Ensure cache directories exist with proper permissions"""
+        directories = [
+            AppConfig.TRANSFORMER_CACHE,
+            AppConfig.BASE_MODEL_DIR
+        ]
+        
+        for directory in directories:
+            try:
+                Path(directory).mkdir(parents=True, exist_ok=True)
+                # Ensure write permissions
+                os.chmod(directory, 0o755)
+            except Exception as e:
+                logger.error(f"Failed to create/set permissions for directory {directory}: {e}")
