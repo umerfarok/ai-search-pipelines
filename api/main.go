@@ -9,8 +9,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 	"github.com/joho/godotenv"
 	"github.com/umerfarok/product-search/handlers"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -65,7 +69,7 @@ func setupCORS() gin.HandlerFunc {
 	return cors.New(config)
 }
 
-func setupRouter(configService *handlers.ConfigService, searchService *handlers.SearchService) *gin.Engine {
+func setupRouter(configService *handlers.ConfigService, searchService *handlers.SearchService, llmHandler *handlers.LLMHandler) *gin.Engine {
 	r := gin.Default()
 
 	// Add CORS middleware
@@ -84,7 +88,7 @@ func setupRouter(configService *handlers.ConfigService, searchService *handlers.
 	r.POST("/config", configService.CreateConfig)
 	r.GET("/config/:id", configService.GetConfig)
 	r.GET("/config", configService.ListConfigs)
-	r.GET("/config/status/:id", configService.GetTrainingStatus) 
+	r.GET("/config/status/:id", configService.GetTrainingStatus)
 	r.PUT("/config/status/:id", configService.UpdateConfigStatus)
 
 	r.GET("/config/llm-models", configService.GetAvailableLLMModels)
@@ -93,8 +97,53 @@ func setupRouter(configService *handlers.ConfigService, searchService *handlers.
 	if searchService != nil {
 		r.POST("/search", searchService.Search)
 	}
-
+	llmGroup := r.Group("/llm")
+	{
+		llmGroup.POST("/train", llmHandler.CreateTrainingConfig)
+		llmGroup.GET("/status/:id", llmHandler.GetTrainingStatus)
+		llmGroup.POST("/chat/session", llmHandler.CreateChatSession)
+		llmGroup.POST("/chat/message", llmHandler.SendMessage)
+		llmGroup.GET("/chat/session/:id", llmHandler.GetSession)
+	}
 	return r
+}
+
+func initRedis() (*redis.Client, error) {
+	redisOptions := &redis.Options{
+		Addr:     os.Getenv("REDIS_HOST") + ":" + os.Getenv("REDIS_PORT"),
+		Password: os.Getenv("REDIS_PASSWORD"),
+		DB:       0,
+	}
+
+	client := redis.NewClient(redisOptions)
+
+	// Test connection
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := client.Ping(ctx).Err(); err != nil {
+		return nil, err
+	}
+
+	return client, nil
+}
+
+// # Add this function to initialize S3
+func initS3() (*s3.Client, error) {
+	cfg, err := config.LoadDefaultConfig(context.Background(),
+		config.WithEndpointResolver(aws.EndpointResolverFunc(
+			func(service, region string) (aws.Endpoint, error) {
+				return aws.Endpoint{
+					URL:           os.Getenv("AWS_ENDPOINT_URL"),
+					SigningRegion: os.Getenv("AWS_REGION"),
+				}, nil
+			})),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return s3.NewFromConfig(cfg), nil
 }
 
 func main() {
@@ -118,13 +167,24 @@ func main() {
 	configService, err := handlers.NewConfigService(db)
 	if err != nil {
 		log.Fatalf("Failed to initialize config service: %v", err)
+	} // Initialize services
+
+	redisClient, err := initRedis()
+	if err != nil {
+		log.Fatalf("Failed to connect to Redis: %v", err)
+	}
+	defer redisClient.Close()
+
+	s3Client, err := initS3()
+	if err != nil {
+		log.Fatalf("Failed to initialize S3 client: %v", err)
 	}
 
 	// Initialize search service
 	searchService := handlers.NewSearchService(db)
-
+	llmHandler := handlers.NewLLMHandler(db, redisClient, s3Client)
 	// Setup router
-	router := setupRouter(configService, searchService)
+	router := setupRouter(configService, searchService, llmHandler)
 
 	// Get port from environment
 	port := os.Getenv("PORT")

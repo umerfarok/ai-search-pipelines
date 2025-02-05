@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -67,34 +68,43 @@ func (s *SearchService) checkHealth() {
 	defer resp.Body.Close()
 }
 
-type SearchResult struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Description string            `json:"description"`
-	Category    string            `json:"category"`
-	Score       float64           `json:"score"`
-	Metadata    map[string]string `json:"metadata"`
+type SearchRequest struct {
+	Query     string                 `json:"query"`
+	ModelPath string                 `json:"model_path"`
+	MaxItems  int                    `json:"max_items,omitempty"`
+	Alpha     float64                `json:"alpha,omitempty"`
+	Filters   map[string]interface{} `json:"filters,omitempty"`
+	Page      int                    `json:"page,omitempty"`
 }
 
-type SearchResponse struct {
-	Results         []SearchResult `json:"results"`
-	Total           int            `json:"total"`
-	NaturalResponse string         `json:"natural_response"`
-	QueryInfo       QueryInfo      `json:"query_info"`
+type SearchResult struct {
+	ID          string                 `json:"id"`
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	Category    string                 `json:"category"`
+	Score       float64                `json:"score"`
+	Text        string                 `json:"text"`
+	Metadata    map[string]interface{} `json:"metadata"`
+	RerankScore float64                `json:"rerank_score,omitempty"`
 }
 
 type QueryInfo struct {
-	Original  string `json:"original"`
-	ModelPath string `json:"model_path"`
+	Original  string                 `json:"original"`
+	Enhanced  string                 `json:"enhanced"`
+	Analysis  map[string]interface{} `json:"analysis"`
+	ModelPath string                 `json:"model_path"`
+}
+
+type SearchResponse struct {
+	Results   []SearchResult `json:"results"`
+	Total     int            `json:"total"`
+	QueryInfo QueryInfo      `json:"query_info"`
+	Page      int            `json:"page,omitempty"`
+	MaxItems  int            `json:"max_items,omitempty"`
 }
 
 func (s *SearchService) Search(c *gin.Context) {
-	var req struct {
-		Query     string                 `json:"query"`
-		ModelPath string                 `json:"model_path"`
-		MaxItems  int                    `json:"max_items"`
-		Filters   map[string]interface{} `json:"filters,omitempty"`
-	}
+	var req SearchRequest
 
 	if err := c.BindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -104,6 +114,12 @@ func (s *SearchService) Search(c *gin.Context) {
 	// Set default max items
 	if req.MaxItems == 0 {
 		req.MaxItems = 10
+	}
+	if req.Alpha == 0 {
+		req.Alpha = 0.7
+	}
+	if req.Page == 0 {
+		req.Page = 1
 	}
 
 	// If Query or ModelPath is empty, get the latest completed model
@@ -154,7 +170,26 @@ func (s *SearchService) Search(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, searchResp)
+	// Apply filters if any
+	if len(req.Filters) > 0 {
+		searchResp.Results = s.applyFilters(searchResp.Results, req.Filters)
+	}
+
+	// Format and return response
+	respData := SearchResponse{
+		Results: searchResp.Results,
+		Total:   len(searchResp.Results),
+		QueryInfo: QueryInfo{
+			Original:  req.Query,
+			Enhanced:  searchResp.QueryInfo.Enhanced,
+			Analysis:  searchResp.QueryInfo.Analysis,
+			ModelPath: req.ModelPath,
+		},
+		Page:     req.Page,
+		MaxItems: req.MaxItems,
+	}
+
+	c.JSON(http.StatusOK, respData)
 }
 
 func (s *SearchService) getModelConfig(configID string) (*config.ModelConfig, error) {
@@ -230,6 +265,61 @@ func (s *SearchService) performSearch(req interface{}, modelConfig *config.Model
 	searchResp.ConfigInfo = *modelConfig
 
 	return &searchResp, nil
+}
+
+func (s *SearchService) applyFilters(results []SearchResult, filters map[string]interface{}) []SearchResult {
+	filtered := make([]SearchResult, 0)
+
+	for _, result := range results {
+		if matchesFilters(result, filters) {
+			filtered = append(filtered, result)
+		}
+	}
+
+	return filtered
+}
+
+func matchesFilters(result SearchResult, filters map[string]interface{}) bool {
+	for key, value := range filters {
+		switch key {
+		case "category":
+			if categoryFilter, ok := value.(string); ok {
+				if !matchesCategory(result.Category, categoryFilter) {
+					return false
+				}
+			}
+		case "price":
+			if priceRange, ok := value.([]float64); ok && len(priceRange) == 2 {
+				if price, exists := result.Metadata["price"].(float64); exists {
+					if price < priceRange[0] || price > priceRange[1] {
+						return false
+					}
+				}
+			}
+		default:
+			// Check metadata fields
+			if metaValue, exists := result.Metadata[key]; exists {
+				if filterValue, ok := value.(string); ok {
+					if !matchesMetadataField(metaValue, filterValue) {
+						return false
+					}
+				}
+			}
+		}
+	}
+
+	return true
+}
+
+func matchesCategory(category, filter string) bool {
+	// Implement category matching logic (e.g., exact match, hierarchical, fuzzy)
+	return strings.Contains(strings.ToLower(category), strings.ToLower(filter))
+}
+
+func matchesMetadataField(value interface{}, filter string) bool {
+	// Convert value to string for comparison
+	strValue := fmt.Sprintf("%v", value)
+	return strings.Contains(strings.ToLower(strValue), strings.ToLower(filter))
 }
 
 func (s *SearchService) Close() {

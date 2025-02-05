@@ -14,33 +14,62 @@ const ModelStatus = {
     PENDING: "pending",
     QUEUED: "queued",
     PROCESSING: "processing",
-    COMPLETED: "completed", 
+    COMPLETED: "completed",
     FAILED: "failed",
     CANCELED: "canceled"
 };
-
-// Updated model configurations
-const AVAILABLE_LLM_MODELS = {
-    "distilgpt2": {
-        name: "DistilGPT-2",
-        description: "Lightweight model optimized for product search",
-        tags: ["fast", "efficient"]
-    },
+export const MODEL_MAPPINGS = {
     "all-minilm-l6": {
-        name: "all-MiniLM-L6-v2",
-        description: "Efficient embedding model for semantic search",
-        tags: ["semantic", "fast"]
+        name: "All-MiniLM-L6",
+        path: "sentence-transformers/all-MiniLM-L6-v2",
+        description: "Fast and efficient general-purpose embedding model",
+        tags: ["semantic", "fast", "default"],
+        isDefault: true
+    },
+    "bge-small": {
+        name: "BGE Small",
+        path: "BAAI/bge-small-en-v1.5",
+        description: "Small but effective embedding model",
+        tags: ["semantic", "fast"],
+        isDefault: false
+    },
+    "bge-base": {
+        name: "BGE Base",
+        path: "BAAI/bge-base-en-v1.5",
+        description: "Medium-sized embedding model",
+        tags: ["semantic", "balanced"],
+        isDefault: false 
+    },
+    "bge-large": {
+        name: "BGE Large",
+        path: "BAAI/bge-large-en-v1.5",
+        description: "Large, high-performance embedding model",
+        tags: ["semantic", "accurate"],
+        isDefault: false
     }
+};
+
+export const DEFAULT_MODEL = "all-minilm-l6";
+
+export const getModelPath = (modelKey) => {
+    return MODEL_MAPPINGS[modelKey]?.path || modelKey;
+};
+
+export const getModelKey = (modelPath) => {
+    for (const [key, info] of Object.entries(MODEL_MAPPINGS)) {
+        if (info.path === modelPath) return key;
+    }
+    return modelPath;
 };
 
 // Reusable UI Components
 const FormSection = ({ title, children, description, className = "" }) => (
     <div className={`mt-6 ${className}`}>
         <div className="flex items-center gap-2 mb-4">
-            <h3 className="text-sm font-medium text-gray-700">{title}</h3>
+            <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300">{title}</h3>
             {description && (
                 <Tooltip content={description}>
-                    <Info className="w-4 h-4 text-gray-400" />
+                    <Info className="w-4 h-4 text-gray-400 dark:text-gray-500" />
                 </Tooltip>
             )}
         </div>
@@ -50,46 +79,47 @@ const FormSection = ({ title, children, description, className = "" }) => (
 
 const Input = ({ label, error, ...props }) => (
     <div className="mb-4">
-        <label className="block text-sm font-medium text-gray-700 mb-2">{label}</label>
+        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">{label}</label>
         <input
             {...props}
-            className={`w-full p-2.5 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 
-                ${error ? 'border-red-300 bg-red-50' : 'border-gray-300'}`}
+            className={`w-full p-2.5 bg-white dark:bg-gray-900 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors
+                ${error ? 'border-red-300 bg-red-50 dark:border-red-800 dark:bg-red-900/50' : 'border-gray-300 dark:border-gray-700'}
+                dark:text-gray-100 dark:placeholder-gray-500`}
         />
-        {error && <p className="mt-1 text-sm text-red-600">{error}</p>}
+        {error && <p className="mt-1 text-sm text-red-600 dark:text-red-400">{error}</p>}
     </div>
 );
 
 const Select = ({ label, options, error, ...props }) => (
     <div className="mb-4">
-        <label className="block text-sm font-medium text-gray-700 mb-2">{label}</label>
+        <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">{label}</label>
         <select
             {...props}
-            className={`w-full p-2.5 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500
-                ${error ? 'border-red-300 bg-red-50' : 'border-gray-300'}`}
+            className={`w-full p-2.5 bg-white dark:bg-gray-900 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors
+                ${error ? 'border-red-300 bg-red-50 dark:border-red-800 dark:bg-red-900/50' : 'border-gray-300 dark:border-gray-700'}
+                dark:text-gray-100`}
         >
             <option value="">Select {label.toLowerCase()}</option>
             {options.map(({ value, label, description }) => (
                 <option key={value} value={value} title={description}>{label}</option>
             ))}
         </select>
-        {error && <p className="mt-1 text-sm text-red-600">{error}</p>}
+        {error && <p className="mt-1 text-sm text-red-600 dark:text-red-400">{error}</p>}
     </div>
 );
 
 const Card = ({ title, subtitle, children, className = "" }) => (
-    <div className={`bg-white border border-gray-200 rounded-lg shadow-sm p-6 ${className}`}>
+    <div className={`bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-sm p-6 transition-colors ${className}`}>
         {title && (
             <div className="mb-6">
-                <h2 className="text-xl font-semibold text-gray-900">{title}</h2>
-                {subtitle && <p className="mt-1 text-sm text-gray-500">{subtitle}</p>}
+                <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">{title}</h2>
+                {subtitle && <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">{subtitle}</p>}
             </div>
         )}
         {children}
     </div>
 );
 
-// Custom Hooks with improved error handling and validation
 const useModelConfig = () => {
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [error, setError] = useState("");
@@ -111,42 +141,35 @@ const useModelConfig = () => {
             name_column: "",
             description_column: "",
             category_column: "",
-            custom_columns: [], // Add this line
+            custom_columns: [],
             required_columns: [],
         },
         training_config: {
             model_type: "transformer",
-            embedding_model: "all-minilm-l6",
+            embedding_model: DEFAULT_MODEL,
             batch_size: 32,
             max_tokens: 512,
-            validation_split: 0.2,
-            llm_model: "distilgpt2",
-            training_params: {},
+            validation_split: 0.2
         },
     });
-
-    const validateConfig = () => {
-        const errors = {};
-        if (!config.name) errors.name = "Name is required";
-        if (!config.schema_mapping.id_column) errors.id_column = "ID column is required";
-        if (!config.schema_mapping.name_column) errors.name_column = "Name column is required";
-
-        setValidationErrors(errors);
-        return Object.keys(errors).length === 0;
-    };
 
     const submitConfig = async (file) => {
         try {
             setIsSubmitting(true);
             setError("");
 
-            if (!validateConfig()) {
-                throw new Error("Please fix validation errors before submitting");
-            }
+            // Convert model key to full path before submitting
+            const submissionConfig = {
+                ...config,
+                training_config: {
+                    ...config.training_config,
+                    embedding_model: getModelPath(config.training_config.embedding_model)
+                }
+            };
 
             const formData = new FormData();
             formData.append("file", file);
-            formData.append("config", JSON.stringify(config));
+            formData.append("config", JSON.stringify(submissionConfig));
 
             const response = await fetch(`${API_BASE_URL}/config`, {
                 method: "POST",
@@ -159,7 +182,7 @@ const useModelConfig = () => {
             }
 
             const data = await response.json();
-            setConfigId(data.data.config_id);
+            setConfigId(data.config_id);
             return data;
 
         } catch (err) {
@@ -280,7 +303,7 @@ const useTraining = (configId) => {
     const monitorTraining = useCallback(async (configId) => {
         const checkStatus = async () => {
             try {
-                const response = await fetch(`${API_BASE_URL}/config/status/${configId}`);
+                const response = await fetch(`${API_BASE_URL}/status/${configId}`);
 
                 if (!response.ok) {
                     throw new Error("Failed to fetch status");
@@ -293,7 +316,6 @@ const useTraining = (configId) => {
                     setTimeout(checkStatus, 5000);
                 }
 
-                // Reset retry count on successful request
                 setRetryCount(0);
 
             } catch (err) {
@@ -322,21 +344,20 @@ const useTraining = (configId) => {
     return { trainingStatus, error, retryTraining };
 };
 
+
 // Status Badge Component with improved visuals
 const StatusBadge = ({ status, showIcon = true }) => {
     const statusConfig = {
         [ModelStatus.COMPLETED]: {
-            color: "green",
-            icon: CheckCircle2,
-            text: "Completed"
+            color: "text-green-700 dark:text-green-400 bg-green-100 dark:bg-green-900/50",
+            icon: CheckCircle2
         },
         [ModelStatus.FAILED]: {
-            color: "red",
-            icon: XCircle,
-            text: "Failed"
+            color: "text-red-700 dark:text-red-400 bg-red-100 dark:bg-red-900/50",
+            icon: XCircle
         },
         [ModelStatus.PROCESSING]: {
-            color: "blue",
+            color: "text-blue-700 dark:text-blue-400 bg-blue-100 dark:bg-blue-900/50",
             icon: Loader2,
             text: "Processing",
             animate: true
@@ -357,16 +378,15 @@ const StatusBadge = ({ status, showIcon = true }) => {
             text: "Canceled"
         }
     }[status] || {
-        color: "gray",
-        icon: AlertCircle,
-        text: "Unknown"
+        color: "text-gray-700 dark:text-gray-400 bg-gray-100 dark:bg-gray-900/50",
+        icon: AlertCircle
     };
 
     const Icon = statusConfig.icon;
 
     return (
         <span className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-sm font-medium
-            bg-${statusConfig.color}-100 text-${statusConfig.color}-800`}>
+            ${statusConfig.color} transition-colors`}>
             {showIcon && (
                 <Icon className={`w-4 h-4 ${statusConfig.animate ? 'animate-spin' : ''}`} />
             )}
@@ -512,7 +532,7 @@ const CustomColumnConfig = ({ columns, onUpdate, availableColumns }) => {
 
     const handleAdd = () => {
         if (!newColumn.user_column || !newColumn.standard_column) return;
-        
+
         onUpdate([...columns, newColumn]);
         setNewColumn({
             user_column: '',
@@ -715,16 +735,14 @@ export default function ProductSearchConfig() {
                 throw new Error("Please upload a CSV file first");
             }
 
-            // Update training config with optimized parameters
             setConfig(prev => ({
                 ...prev,
                 training_config: {
                     ...prev.training_config,
                     model_type: "transformer",
                     embedding_model: "all-minilm-l6",
-                    batch_size: 32,
+                    batch_size: 128,
                     max_tokens: 512,
-                    llm_model: "distilgpt2"
                 }
             }));
 
@@ -742,7 +760,7 @@ export default function ProductSearchConfig() {
         <div className="max-w-7xl mx-auto p-6 space-y-8">
             <div className="flex justify-between items-center">
                 <div>
-                    <h1 className="text-3xl font-bold text-gray-900">Product Search Configuration</h1>
+                    <h1 className="text-3xl font-bold text-white-900">Product Search Configuration</h1>
                     <p className="mt-2 text-gray-600">Configure and train your product search model</p>
                 </div>
             </div>
@@ -798,7 +816,7 @@ export default function ProductSearchConfig() {
                     >
                         <div
                             className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors
-                                        ${isUploading ? 'border-blue-300 bg-blue-50' : 'border-gray-300 hover:border-blue-500'}`}
+                                        ${isUploading ? 'border-blue-300 bg-blue-50 dark:border-blue-700 dark:bg-blue-900/20' : 'border-gray-300 dark:border-gray-700 hover:border-blue-500 dark:hover:border-blue-600'}`}
                             onDragOver={(e) => e.preventDefault()}
                             onDrop={(e) => {
                                 e.preventDefault();
@@ -860,26 +878,27 @@ export default function ProductSearchConfig() {
                         description="Configure your search model parameters"
                     >
                         <Select
-                            label="LLM Model"
-                            value={config.training_config?.llm_model}
+                            label="Embedding Model"
+                            value={config.training_config?.embedding_model}
                             onChange={(e) => setConfig(prev => ({
                                 ...prev,
                                 training_config: {
                                     ...prev.training_config,
-                                    llm_model: e.target.value
+                                    embedding_model: e.target.value
                                 }
                             }))}
-                            options={Object.entries(AVAILABLE_LLM_MODELS).map(([key, model]) => ({
+                            options={Object.entries(MODEL_MAPPINGS).map(([key, model]) => ({
                                 value: key,
                                 label: model.name,
                                 description: model.description
                             }))}
+                            isLoading={false}
                         />
 
                         <div className="mt-4">
                             <h4 className="text-sm font-medium text-gray-700 mb-2">Model Features</h4>
                             <div className="flex flex-wrap gap-2">
-                                {AVAILABLE_LLM_MODELS[config.training_config?.llm_model]?.tags.map((tag) => (
+                                {MODEL_MAPPINGS[config.training_config?.embedding_model]?.tags.map((tag) => (
                                     <span key={tag} className="px-2 py-1 bg-blue-100 text-blue-800 rounded-full text-xs">
                                         {tag}
                                     </span>
