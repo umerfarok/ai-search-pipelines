@@ -156,28 +156,14 @@ class DynamicQueryUnderstanding:
                 query, candidate_labels=intent_labels, multi_label=True
             )
 
-            # Round scores for better readability
             understanding = {
                 "original_query": query,
-                "categories": [
-                    {
-                        "category": cat["category"],
-                        "confidence": round(float(cat["confidence"]), 4),
-                    }
-                    for cat in categories
-                ],
+                "categories": categories,
                 "expanded_terms": expanded_terms,
-                "semantic_features": {
-                    "entities": semantic_features.get("entities", []),
-                    "key_phrases": semantic_features.get("key_phrases", []),
-                    "sentiment": round(float(semantic_features.get("sentiment", 0)), 4),
-                    "dependencies": semantic_features.get("dependencies", []),
-                },
+                "semantic_features": semantic_features,
                 "intent": {
                     "labels": intent_results["labels"],
-                    "scores": [
-                        round(float(score), 4) for score in intent_results["scores"]
-                    ],
+                    "scores": [float(score) for score in intent_results["scores"]],
                 },
             }
 
@@ -364,10 +350,6 @@ class HybridSearchEngine:
             logger.error(f"Search engine initialization failed: {e}")
             return False
 
-        except Exception as e:
-            logger.error(f"Search engine initialization failed: {e}")
-            return False
-
     def hybrid_search(
         self,
         query: str,
@@ -385,12 +367,15 @@ class HybridSearchEngine:
             tokenized_query = word_tokenize(query.lower())
             bm25_scores = np.array(self.bm25.get_scores(tokenized_query))
 
+            # Normalize scores
             bm25_scores = self._normalize_scores(bm25_scores)
             semantic_scores = self._normalize_scores(semantic_scores)
 
+            # Adjust weights based on query analysis
             alpha = self._adjust_weights(query_analysis)
             combined_scores = alpha * semantic_scores + (1 - alpha) * bm25_scores
 
+            # Round scores for better readability
             return combined_scores, {
                 "query_understanding": query_analysis,
                 "scores": {
@@ -743,7 +728,7 @@ class SearchService:
 
             candidate = {
                 "id": candidate_id,
-                "score": score,
+                "score": round(float(score), 4),  # Round score
                 "metadata": {},
                 "intent_matches": {},
             }
@@ -763,20 +748,20 @@ class SearchService:
             # Intent-specific scoring
             intents = self.current_query_analysis.get("intent", {}).get("labels", [])
             if "compare" in intents:
-                candidate["intent_matches"]["compare"] = (
-                    self._score_comparison_features(candidate)
+                candidate["intent_matches"]["compare"] = round(
+                    self._score_comparison_features(candidate), 4
                 )
             if "purchase" in intents:
-                candidate["intent_matches"]["purchase"] = self._score_purchase_features(
-                    candidate
+                candidate["intent_matches"]["purchase"] = round(
+                    self._score_purchase_features(candidate), 4
                 )
             if "learn" in intents:
-                candidate["intent_matches"]["learn"] = self._score_learn_features(
-                    candidate
+                candidate["intent_matches"]["learn"] = round(
+                    self._score_learn_features(candidate), 4
                 )
             if "explore" in intents:
-                candidate["intent_matches"]["explore"] = self._score_explore_features(
-                    candidate
+                candidate["intent_matches"]["explore"] = round(
+                    self._score_explore_features(candidate), 4
                 )
             return candidate
 
