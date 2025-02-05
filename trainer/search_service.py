@@ -988,6 +988,7 @@ def initialize_service():
         try:
             nltk.download("punkt", download_dir=nltk_data_dir)
             nltk.download("punkt_tab", download_dir=nltk_data_dir)
+            nltk.download('words', download_dir=nltk_data_dir)
         except Exception as e:
             logger.error(f"Failed to download NLTK data: {e}")
             return False

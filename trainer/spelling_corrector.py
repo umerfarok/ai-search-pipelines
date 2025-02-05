@@ -2,7 +2,6 @@ from typing import Tuple, List
 from collections import Counter
 import re
 from nltk.corpus import words
-import nltk
 from symspellpy import SymSpell, Verbosity
 
 class SpellingCorrector:
@@ -18,7 +17,6 @@ class SpellingCorrector:
         """Initialize spelling corrector with custom vocabulary"""
         try:
             # Download required NLTK data if not already present
-            nltk.download('words', quiet=True)
             
             # Add custom vocabulary
             if custom_vocabulary:
