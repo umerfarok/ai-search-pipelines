@@ -92,6 +92,7 @@ class AppConfig:
     HF_HUB_CACHE: str = os.getenv("HF_HUB_CACHE", "/app/shared/cache/huggingface/hub")
     NLTK_DATA: str = os.getenv("NLTK_DATA", "/app/shared/cache/nltk_data")
     ONNX_CACHE_DIR: str = os.getenv("ONNX_CACHE_DIR", "/app/model_cache/onnx")
+    MONGO_URI: str = os.getenv("MONGO_URI", "mongodb://mongo:27017/")
 
     # API Configuration
     API_HOST: str = os.getenv("API_HOST", "http://api:8080")

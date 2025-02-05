@@ -190,6 +190,80 @@ services:
       - app-network
     depends_on:
       - api
+
+  lm-training-service:
+    build:
+      context: ./trainer
+      dockerfile: Dockerfile.python
+    environment:
+      TRANSFORMERS_CACHE: /app/cache/transformers
+      HF_HOME: /app/cache/huggingface
+      TORCH_HOME: /app/cache/torch
+      XDG_CACHE_HOME: /app/cache
+      MODEL_STORAGE_DIR: /app/models
+      AWS_ACCESS_KEY: ${AWS_ACCESS_KEY}
+      AWS_SECRET_KEY: ${AWS_SECRET_KEY}
+      S3_BUCKET: ${S3_BUCKET}
+      AWS_REGION: ${AWS_REGION}
+      AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL}
+      MONGO_URI: mongodb://root:example@mongo:27017
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    command: ["python", "llm_training_service.py"]
+    volumes:
+      - ./cache:/app/cache:rw
+      - ./models:/app/models:rw
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - app-network
+    depends_on:
+      - redis
+      - mongo
+      - ml-base
+
+  llm-chat-service:
+    build:
+      context: ./trainer
+      dockerfile: Dockerfile.python
+    environment:
+      TRANSFORMERS_CACHE: /app/cache/transformers
+      HF_HOME: /app/cache/huggingface
+      TORCH_HOME: /app/cache/torch
+      MODEL_STORAGE_DIR: /app/models
+      AWS_ACCESS_KEY: ${AWS_ACCESS_KEY}
+      AWS_SECRET_KEY: ${AWS_SECRET_KEY}
+      S3_BUCKET: ${S3_BUCKET}
+      AWS_REGION: ${AWS_REGION}
+      AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL}
+      MONGO_URI: mongodb://root:example@mongo:27017
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    ports:
+      - "5002:5002"
+    command: ["python", "llm_chat_service.py"]
+    volumes:
+      - ./cache:/app/cache:rw
+      - ./models:/app/models:rw
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - app-network
+    depends_on:
+      - redis
+      - mongo
+      - ml-base
+      
 networks:
   app-network:
     driver: bridge

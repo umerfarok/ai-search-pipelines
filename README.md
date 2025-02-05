@@ -251,6 +251,6 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 For support, email [umerfarooq.dev@gmail.com] or create an issue in the repository.
 
 
-docker-compose logs -f api search-service
+docker-compose logs -f  search-service
 docker-compose logs -f training-service
 docker-compose exec api sh
