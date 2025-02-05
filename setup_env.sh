@@ -1,37 +1,68 @@
 #!/bin/bash
+set -e  # Exit immediately if a command exits with a non-zero status
 
-set -e  # Exit on error
-
+echo "=========================="
 echo "Updating system packages..."
-sudo apt update && sudo apt upgrade -y
+echo "=========================="
+sudo apt update
 
-### Install Node.js 20+
-echo "Installing Node.js 20+..."
+########################################
+# 1. Install Node.js 20+
+########################################
+echo ""
+echo "========================================"
+echo "Installing Node.js 20+ via NodeSource..."
+echo "========================================"
+# Download and run the Node.js 20.x setup script from NodeSource
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+# Install Node.js (includes npm)
 sudo apt install -y nodejs
-echo "Node.js version: $(node -v)"
 
-### Install Docker Compose (if not installed with Docker)
-if ! command -v docker-compose &> /dev/null; then
+# Verify Node.js and npm installation
+echo "Node.js version: $(node -v)"
+echo "npm version: $(npm -v)"
+
+########################################
+# 2. Install Docker Compose
+########################################
+# Check if docker-compose is already installed
+if command -v docker-compose &>/dev/null; then
+    echo ""
+    echo "Docker Compose is already installed:"
+    docker-compose --version
+else
+    echo ""
+    echo "========================================"
     echo "Installing Docker Compose..."
+    echo "========================================"
     sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
     sudo chmod +x /usr/local/bin/docker-compose
     echo "Docker Compose version: $(docker-compose --version)"
 fi
 
+########################################
+# 3. Install NVIDIA Container Toolkit
+########################################
+echo ""
+echo "========================================"
+echo "Setting up NVIDIA Container Toolkit..."
+echo "========================================"
 
-### Install NVIDIA Container Toolkit
-echo "Installing NVIDIA Container Toolkit..."
-distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
+# Add the NVIDIA package repositories
+distribution=$(. /etc/os-release; echo $ID$VERSION_ID)
+# Import the GPG key
 curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add -
+# Add the repository to APT sources
 curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
+
+# Update apt package list and install the NVIDIA container toolkit
 sudo apt update
 sudo apt install -y nvidia-container-toolkit
-sudo systemctl restart docker
 
-### Configure Docker to use NVIDIA runtime
-echo "Setting NVIDIA as default runtime for Docker..."
-sudo tee /etc/docker/daemon.json <<EOF
+# Configure Docker to use the NVIDIA runtime
+echo ""
+echo "Configuring Docker to use the NVIDIA runtime..."
+sudo tee /etc/docker/daemon.json > /dev/null <<EOF
 {
     "runtimes": {
         "nvidia": {
@@ -42,8 +73,8 @@ sudo tee /etc/docker/daemon.json <<EOF
 }
 EOF
 
+# Restart Docker to apply the changes
 sudo systemctl restart docker
-echo "Setup complete!"
 
-echo "Testing NVIDIA inside Docker..."
-docker run --rm --gpus all nvidia/cuda:12.2.0-base nvidia-smi
+echo ""
+echo "Setup complete!"
