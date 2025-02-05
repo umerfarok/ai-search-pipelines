@@ -225,16 +225,28 @@ class EnhancedQueryUnderstanding:
             return query
 
     def _extract_keyphrases(self, query: str) -> List[str]:
+        """Extract key phrases from query with improved error handling"""
         try:
-            logger.debug(f"Processing query: {query}")
+            # Use token-classification with proper aggregation
             results = self.keyphrase_model(query)
-            logger.debug(f"Raw model output: {json.dumps(results, indent=2)}")
-            keyphrases = [result["word"].strip() for result in results]
+
+            # Handle both list and dict response formats
+            if isinstance(results, list):
+                keyphrases = []
+                for result in results:
+                    if isinstance(result, dict):
+                        if "word" in result:
+                            keyphrases.append(result["word"].strip())
+                        elif "entity_group" in result:
+                            keyphrases.append(result["word"].strip())
+            else:
+                keyphrases = [query]  # Fallback to original query if extraction fails
+
             logger.info(f"Extracted keyphrases: {keyphrases}")
-            return keyphrases
+            return list(set(keyphrases))  # Remove duplicates
         except Exception as e:
             logger.error(f"Keyphrase extraction failure: {str(e)}")
-            return []
+            return [query]
 
     def _get_dynamic_categories(self, text: str) -> List[Dict[str, float]]:
         """Dynamically extract categories from text"""
@@ -492,45 +504,61 @@ class OptimizedHybridSearch:
         }
 
     def initialize(self, texts: List[str], embeddings: np.ndarray) -> bool:
-        """Initialize search engine with corpus and FAISS index"""
+        """Initialize search engine with improved validation"""
         try:
-            if not texts or not embeddings.size:
-                logger.error("Empty text corpus or embeddings")
+            if not texts:
+                logger.error("Empty text corpus")
+                return False
+
+            if embeddings is None or embeddings.size == 0:
+                logger.error("Invalid embeddings data")
                 return False
 
             # Initialize BM25
             self.tokenized_corpus = []
+            valid_docs = False
             for text in texts:
                 try:
                     tokenized = (
                         word_tokenize(text.lower()) if isinstance(text, str) else []
                     )
+                    if tokenized:  # Only add non-empty tokenized texts
+                        valid_docs = True
                     self.tokenized_corpus.append(tokenized)
                 except Exception as e:
                     logger.warning(f"Error tokenizing document: {e}")
                     self.tokenized_corpus.append([])
 
-            # Validate tokenized corpus
-            if not any(self.tokenized_corpus):
-                logger.error("No valid tokenized documents for BM25")
+            if not valid_docs:
+                logger.error("No valid documents for BM25")
                 return False
 
             self.bm25 = BM25Okapi(self.tokenized_corpus)
 
             # Initialize FAISS
             dim = embeddings.shape[1]
-            if dim <= 0:
-                logger.error("Invalid embedding dimension")
+            self.faiss_index = faiss.IndexFlatIP(dim)
+
+            # Add embeddings to FAISS index with proper type conversion
+            embeddings_float32 = embeddings.astype("float32")
+            if np.isnan(embeddings_float32).any():
+                logger.error("NaN values found in embeddings")
                 return False
 
-            self.faiss_index = faiss.IndexFlatIP(dim)
-            self.faiss_index.add(embeddings.astype("float32"))
+            self.faiss_index.add(embeddings_float32)
 
-            logger.info("Search engine initialized successfully")
+            # Verify index is not empty
+            if self.faiss_index.ntotal == 0:
+                logger.error("FAISS index is empty after initialization")
+                return False
+
+            logger.info(
+                f"Search engine initialized successfully with {len(texts)} documents"
+            )
             return True
 
         except Exception as e:
-            logger.error(f"Search engine initialization failed: {e}")
+            logger.error(f"Search engine initialization failed: {str(e)}")
             return False
 
     def _exact_match_boost(self, candidate: Dict, query_terms: List[str]) -> float:
@@ -547,11 +575,22 @@ class OptimizedHybridSearch:
     def hybrid_search(
         self, query: str, query_embed: np.ndarray, context: Dict, k: int = 200
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Perform hybrid search with FAISS and BM25"""
+        """Perform hybrid search with improved validation"""
         try:
             if self.faiss_index is None or self.bm25 is None:
-                logger.error("Search engine not initialized")
-                return np.array([]), np.array([])
+                raise ValueError("Search engine not initialized")
+
+            # Validate query embedding
+            if query_embed is None or query_embed.size == 0:
+                raise ValueError("Invalid query embedding")
+
+            # Reshape query embedding if needed
+            if query_embed.ndim == 1:
+                query_embed = query_embed.reshape(1, -1)
+
+            # Validate query context
+            if not context or not isinstance(context.get("query_analysis"), dict):
+                raise ValueError("Invalid query context")
 
             start_time = time.time()
 
@@ -568,27 +607,11 @@ class OptimizedHybridSearch:
             alpha = self._adjust_weights(context["query_analysis"])
             combined_scores = alpha * semantic_scores + (1 - alpha) * bm25_scores
 
-            # Apply exact match boosts
-            query_terms = set(
-                tokenized_query + context["query_analysis"].get("keyphrases", [])
-            )
-            boosted_scores = []
-
-            for idx, score in zip(I[0], combined_scores):
-                candidate = {
-                    "text": " ".join(self.tokenized_corpus[idx]),
-                    "score": score,
-                }
-                boost = self._exact_match_boost(candidate, query_terms)
-                boosted_scores.append(score * boost)
-
-            boosted_scores = np.array(boosted_scores)
-
             logger.info(f"Hybrid search completed in {time.time()-start_time:.3f}s")
-            return I[0], boosted_scores
+            return I[0], combined_scores
 
         except Exception as e:
-            logger.error(f"Optimized search failed: {e}")
+            logger.error(f"Hybrid search failed: {str(e)}")
             return np.array([]), np.array([])
 
     def _adjust_weights(self, query_analysis: Dict) -> float:
@@ -644,34 +667,54 @@ class EnhancedSearchService:
             logger.error(f"Error preloading models: {e}")
 
     def initialize_model(self, model_path: str) -> bool:
-        """Initialize model data and indices"""
+        """Initialize model data and indices with improved validation"""
         try:
             model_data = self.load_model(model_path)
             if not model_data:
                 logger.error(f"Failed to load model data from {model_path}")
                 return False
 
-            # Validate embeddings and texts
-            embeddings = model_data["embeddings"].astype("float32")
-            texts = self._get_searchable_texts(model_data["products"])
-
-            if not texts or not embeddings.size:
-                logger.error("Invalid model data: empty texts or embeddings")
+            # Load and validate products
+            products_df = self._load_products(model_path)
+            if products_df is None or products_df.empty:
+                logger.error("Failed to load products data or empty dataframe")
                 return False
 
-            # Initialize search engine
-            if not self.hybrid_search.initialize(texts, embeddings):
+            # Add products to model data
+            model_data["products"] = products_df
+
+            # Validate embeddings
+            embeddings = model_data.get("embeddings")
+            if (
+                embeddings is None
+                or not isinstance(embeddings, np.ndarray)
+                or embeddings.size == 0
+            ):
+                logger.error("Invalid embeddings data")
+                return False
+
+            # Get searchable texts
+            texts = self._get_searchable_texts(products_df)
+            if not texts:
+                logger.error("No valid searchable texts generated")
+                return False
+
+            # Initialize hybrid search
+            if not self.hybrid_search.initialize(texts, embeddings.astype("float32")):
                 logger.error("Failed to initialize hybrid search engine")
                 return False
 
             # Preprocess field embeddings
-            self._preprocess_field_embeddings(model_data["products"])
+            self._preprocess_field_embeddings(products_df)
+
+            # Cache the model data
+            self.model_cache.put(model_path, model_data)
 
             logger.info(f"Model {model_path} initialized successfully")
             return True
 
         except Exception as e:
-            logger.error(f"Model initialization failed: {e}")
+            logger.error(f"Model initialization failed: {str(e)}")
             return False
 
     def _preprocess_field_embeddings(self, products: pd.DataFrame):
