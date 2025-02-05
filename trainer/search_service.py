@@ -120,13 +120,11 @@ class DynamicQueryUnderstanding:
             self.sentiment_analyzer = pipeline(
                 "sentiment-analysis",
                 model="distilbert/distilbert-base-uncased-finetuned-sst-2-english",
-                device=self.device,
+                device=self.device
             )
         try:
             result = self.sentiment_analyzer(text[:512])[0]  # Truncate to max length
-            return (
-                result["score"] if result["label"] == "POSITIVE" else -result["score"]
-            )
+            return result["score"] if result["label"] == "POSITIVE" else -result["score"]
         except Exception as e:
             logger.error(f"Sentiment analysis failed: {e}")
             return 0.0
@@ -338,13 +336,8 @@ class HybridSearchEngine:
                     logger.warning(f"Error tokenizing document: {e}")
                     self.tokenized_corpus.append([])
 
-            # Ensure at least one valid tokenized document exists
-            if any(self.tokenized_corpus):
-                self.bm25 = BM25Okapi(self.tokenized_corpus)
-                return True
-            else:
-                logger.error("No valid tokenized documents found")
-                return False
+            self.bm25 = BM25Okapi(self.tokenized_corpus)
+            return True
 
         except Exception as e:
             logger.error(f"Search engine initialization failed: {e}")
@@ -359,34 +352,26 @@ class HybridSearchEngine:
     ) -> Tuple[np.ndarray, Dict]:
         """Enhanced hybrid search with intent-aware scoring"""
         try:
-            # Ensure BM25 is initialized
             if self.bm25 is None:
-                raise ValueError("BM25 not initialized. Call initialize() first.")
-
+                logger.warning("BM25 not initialized. Call initialize() first.")
             query_analysis = self.query_understanding.analyze(query, context)
             tokenized_query = word_tokenize(query.lower())
             bm25_scores = np.array(self.bm25.get_scores(tokenized_query))
 
-            # Normalize scores
             bm25_scores = self._normalize_scores(bm25_scores)
             semantic_scores = self._normalize_scores(semantic_scores)
 
-            # Adjust weights based on query analysis
             alpha = self._adjust_weights(query_analysis)
             combined_scores = alpha * semantic_scores + (1 - alpha) * bm25_scores
 
-            # Round scores for better readability
             return combined_scores, {
                 "query_understanding": query_analysis,
                 "scores": {
-                    "semantic": round(float(semantic_scores.mean()), 4),
-                    "lexical": round(float(bm25_scores.mean()), 4),
-                    "combined": round(float(combined_scores.mean()), 4),
+                    "semantic": semantic_scores.mean(),
+                    "lexical": bm25_scores.mean(),
+                    "combined": combined_scores.mean(),
                 },
-                "weights": {
-                    "semantic": round(float(alpha), 4),
-                    "lexical": round(float(1 - alpha), 4),
-                },
+                "weights": {"semantic": alpha, "lexical": 1 - alpha},
             }
 
         except Exception as e:
@@ -728,7 +713,7 @@ class SearchService:
 
             candidate = {
                 "id": candidate_id,
-                "score": round(float(score), 4),  # Round score
+                "score": score,
                 "metadata": {},
                 "intent_matches": {},
             }
@@ -748,20 +733,20 @@ class SearchService:
             # Intent-specific scoring
             intents = self.current_query_analysis.get("intent", {}).get("labels", [])
             if "compare" in intents:
-                candidate["intent_matches"]["compare"] = round(
-                    self._score_comparison_features(candidate), 4
+                candidate["intent_matches"]["compare"] = (
+                    self._score_comparison_features(candidate)
                 )
             if "purchase" in intents:
-                candidate["intent_matches"]["purchase"] = round(
-                    self._score_purchase_features(candidate), 4
+                candidate["intent_matches"]["purchase"] = self._score_purchase_features(
+                    candidate
                 )
             if "learn" in intents:
-                candidate["intent_matches"]["learn"] = round(
-                    self._score_learn_features(candidate), 4
+                candidate["intent_matches"]["learn"] = self._score_learn_features(
+                    candidate
                 )
             if "explore" in intents:
-                candidate["intent_matches"]["explore"] = round(
-                    self._score_explore_features(candidate), 4
+                candidate["intent_matches"]["explore"] = self._score_explore_features(
+                    candidate
                 )
             return candidate
 
@@ -822,19 +807,14 @@ class SearchService:
             if products_df is None:
                 raise ValueError("Failed to load products data")
 
-            # Initialize BM25 with product descriptions
-            descriptions = products_df[
-                model_data["metadata"]["schema_mapping"].get(
-                    "descriptioncolumn", "name"
-                )
-            ].tolist()
-            if not self.hybrid_search.initialize(descriptions):
-                raise ValueError("Failed to initialize BM25")
-
             # Generate embeddings and scores
             model_name = model_data["metadata"]["models"]["embeddings"]
             query_embed = self.embedding_manager.generate_embedding([query], model_name)
             semantic_scores = np.dot(model_data["embeddings"], query_embed.reshape(-1))
+
+            # Initialize search context
+            context = context or {}
+            context.setdefault("previous_queries", []).append(query)
 
             # Perform hybrid search
             combined_scores, query_analysis = self.hybrid_search.hybrid_search(
