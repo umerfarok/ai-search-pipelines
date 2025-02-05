@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Any, Tuple
 import torch
 import numpy as np
 from sentence_transformers import SentenceTransformer, CrossEncoder
-from quart import Quart, request, jsonify 
+from flask import Flask, request, jsonify
 import boto3
 from botocore.exceptions import ClientError
 from botocore.config import Config
@@ -26,13 +26,12 @@ from cachetools import TTLCache, LRUCache
 import time
 import pycorrector
 from rapidfuzz import process, fuzz
-import asyncio
-from typing import Union
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = Quart(__name__)
+app = Flask(__name__)
 
 
 class ModelCache:
@@ -623,7 +622,7 @@ class EnhancedSearchService:
         except Exception as e:
             logger.error(f"Error preloading models: {e}")
 
-    async def initialize_model(self, model_path: str) -> bool:
+    def initialize_model(self, model_path: str) -> bool:
         """Initialize model data and indices"""
         try:
             model_data = self.load_model(model_path)
@@ -845,7 +844,7 @@ class EnhancedSearchService:
 
         return matches
 
-    async def search(
+    def search(
         self,
         query: str,
         model_path: str,
@@ -875,7 +874,7 @@ class EnhancedSearchService:
             query_embed = self.embedding_manager.generate_embedding([query])[0]
 
             # Perform hybrid search
-            indices, scores = await self.hybrid_search.hybrid_search(
+            indices, scores = self.hybrid_search.hybrid_search(
                 query=query,
                 query_embed=query_embed.reshape(1, -1),
                 context={"query_analysis": query_analysis},
@@ -932,7 +931,7 @@ search_service = EnhancedSearchService()
 
 
 @app.route("/search", methods=["POST"])
-async def search():
+def search():
     """Enhanced search endpoint with improved error handling"""
     try:
         data = request.get_json()
@@ -952,7 +951,7 @@ async def search():
 
         # Perform search
         try:
-            results = await search_service.search(
+            results = search_service.search(
                 query=data["query"],
                 model_path=data["model_path"],
                 context=data.get("context"),

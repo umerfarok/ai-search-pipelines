@@ -19,7 +19,7 @@ curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
 sudo apt install -y nodejs
 
 # Verify Node.js and npm installation
-echo "Node.js version: $(node -v)"
+echo "Node.js version: $(node -v)"  
 echo "npm version: $(npm -v)"
 
 ########################################
