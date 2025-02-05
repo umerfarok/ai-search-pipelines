@@ -225,25 +225,40 @@ class EnhancedQueryUnderstanding:
             return query
 
     def _extract_keyphrases(self, query: str) -> List[str]:
-        """Extract key phrases from query with improved error handling"""
+        """Extract key phrases from query with improved error handling and fallback"""
         try:
-            # Use token-classification with proper aggregation
+            # First try using the keyphrase model
             results = self.keyphrase_model(query)
 
-            # Handle both list and dict response formats
+            keyphrases = []
             if isinstance(results, list):
-                keyphrases = []
                 for result in results:
                     if isinstance(result, dict):
                         if "word" in result:
                             keyphrases.append(result["word"].strip())
                         elif "entity_group" in result:
                             keyphrases.append(result["word"].strip())
-            else:
-                keyphrases = [query]  # Fallback to original query if extraction fails
+
+            # If no keyphrases found, fallback to basic tokenization
+            if not keyphrases:
+                doc = self.nlp(query)
+                keyphrases = [chunk.text.strip() for chunk in doc.noun_chunks]
+
+            # If still no keyphrases, use individual tokens
+            if not keyphrases:
+                keyphrases = [
+                    token.text.strip()
+                    for token in self.nlp(query)
+                    if not token.is_stop and not token.is_punct
+                ]
+
+            # Final fallback
+            if not keyphrases:
+                keyphrases = [query]
 
             logger.info(f"Extracted keyphrases: {keyphrases}")
             return list(set(keyphrases))  # Remove duplicates
+
         except Exception as e:
             logger.error(f"Keyphrase extraction failure: {str(e)}")
             return [query]
@@ -504,27 +519,30 @@ class OptimizedHybridSearch:
         }
 
     def initialize(self, texts: List[str], embeddings: np.ndarray) -> bool:
-        """Initialize search engine with improved validation"""
+        """Initialize search engine with improved validation and error handling"""
         try:
-            if not texts:
-                logger.error("Empty text corpus")
+            if not texts or not isinstance(texts, list):
+                logger.error("Invalid text corpus")
                 return False
 
-            if embeddings is None or embeddings.size == 0:
+            if embeddings is None or not isinstance(embeddings, np.ndarray):
                 logger.error("Invalid embeddings data")
                 return False
 
             # Initialize BM25
             self.tokenized_corpus = []
             valid_docs = False
+
             for text in texts:
                 try:
-                    tokenized = (
-                        word_tokenize(text.lower()) if isinstance(text, str) else []
-                    )
-                    if tokenized:  # Only add non-empty tokenized texts
+                    if not isinstance(text, str):
+                        text = str(text)
+                    tokenized = word_tokenize(text.lower())
+                    if tokenized:
                         valid_docs = True
-                    self.tokenized_corpus.append(tokenized)
+                        self.tokenized_corpus.append(tokenized)
+                    else:
+                        self.tokenized_corpus.append([])
                 except Exception as e:
                     logger.warning(f"Error tokenizing document: {e}")
                     self.tokenized_corpus.append([])
@@ -533,23 +551,31 @@ class OptimizedHybridSearch:
                 logger.error("No valid documents for BM25")
                 return False
 
-            self.bm25 = BM25Okapi(self.tokenized_corpus)
-
-            # Initialize FAISS
-            dim = embeddings.shape[1]
-            self.faiss_index = faiss.IndexFlatIP(dim)
-
-            # Add embeddings to FAISS index with proper type conversion
-            embeddings_float32 = embeddings.astype("float32")
-            if np.isnan(embeddings_float32).any():
-                logger.error("NaN values found in embeddings")
+            try:
+                self.bm25 = BM25Okapi(self.tokenized_corpus)
+            except Exception as e:
+                logger.error(f"BM25 initialization failed: {e}")
                 return False
 
-            self.faiss_index.add(embeddings_float32)
+            # Initialize FAISS
+            try:
+                dim = embeddings.shape[1]
+                self.faiss_index = faiss.IndexFlatIP(dim)
 
-            # Verify index is not empty
-            if self.faiss_index.ntotal == 0:
-                logger.error("FAISS index is empty after initialization")
+                # Convert embeddings to float32 and handle NaN values
+                embeddings_float32 = embeddings.astype("float32")
+                if np.isnan(embeddings_float32).any():
+                    logger.error("NaN values found in embeddings")
+                    return False
+
+                self.faiss_index.add(embeddings_float32)
+
+                if self.faiss_index.ntotal == 0:
+                    logger.error("FAISS index is empty after initialization")
+                    return False
+
+            except Exception as e:
+                logger.error(f"FAISS initialization failed: {e}")
                 return False
 
             logger.info(
@@ -667,21 +693,23 @@ class EnhancedSearchService:
             logger.error(f"Error preloading models: {e}")
 
     def initialize_model(self, model_path: str) -> bool:
-        """Initialize model data and indices with improved validation"""
+        """Initialize model data and indices with improved validation and logging"""
         try:
+            # Load model data
             model_data = self.load_model(model_path)
             if not model_data:
                 logger.error(f"Failed to load model data from {model_path}")
                 return False
 
-            # Load and validate products
-            products_df = self._load_products(model_path)
-            if products_df is None or products_df.empty:
-                logger.error("Failed to load products data or empty dataframe")
+            # Validate products dataframe
+            products_df = model_data.get("products")
+            if (
+                products_df is None
+                or not isinstance(products_df, pd.DataFrame)
+                or products_df.empty
+            ):
+                logger.error("Invalid or empty products dataframe")
                 return False
-
-            # Add products to model data
-            model_data["products"] = products_df
 
             # Validate embeddings
             embeddings = model_data.get("embeddings")
@@ -693,19 +721,25 @@ class EnhancedSearchService:
                 logger.error("Invalid embeddings data")
                 return False
 
-            # Get searchable texts
+            # Generate searchable texts
             texts = self._get_searchable_texts(products_df)
             if not texts:
                 logger.error("No valid searchable texts generated")
                 return False
 
+            logger.info(f"Generated {len(texts)} searchable texts")
+
             # Initialize hybrid search
-            if not self.hybrid_search.initialize(texts, embeddings.astype("float32")):
+            if not self.hybrid_search.initialize(texts, embeddings):
                 logger.error("Failed to initialize hybrid search engine")
                 return False
 
             # Preprocess field embeddings
-            self._preprocess_field_embeddings(products_df)
+            try:
+                self._preprocess_field_embeddings(products_df)
+            except Exception as e:
+                logger.error(f"Field embeddings preprocessing failed: {e}")
+                # Continue even if field preprocessing fails
 
             # Cache the model data
             self.model_cache.put(model_path, model_data)
@@ -727,15 +761,32 @@ class EnhancedSearchService:
                 self.preprocessed_embeddings[field] = embeddings
 
     def _get_searchable_texts(self, products: pd.DataFrame) -> List[str]:
-        """Combine relevant fields into searchable texts"""
+        """Combine relevant fields into searchable texts with improved error handling"""
         texts = []
-        for _, row in products.iterrows():
-            text_parts = []
-            for field in ["name", "category", "description", "specifications"]:
-                if field in row and pd.notna(row[field]):
-                    text_parts.append(str(row[field]))
-            texts.append(" ".join(text_parts))
-        return texts
+        try:
+            for _, row in products.iterrows():
+                text_parts = []
+                for field in ["name", "category", "description", "specifications"]:
+                    if field in row and pd.notna(row[field]):
+                        try:
+                            text_parts.append(str(row[field]).strip())
+                        except Exception as e:
+                            logger.warning(f"Error processing field {field}: {e}")
+                            continue
+                
+                if text_parts:  # Only add if we have valid text parts
+                    texts.append(" ".join(text_parts))
+                else:
+                    logger.warning(f"No valid text parts found for row {_}")
+            
+            if not texts:
+                logger.error("No valid searchable texts generated")
+                return []
+                
+            return texts
+        except Exception as e:
+            logger.error(f"Error generating searchable texts: {e}")
+            return []
 
     def load_model(self, model_path: str) -> Optional[Dict]:
         """Load model data from cache or storage"""
