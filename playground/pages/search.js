@@ -298,6 +298,40 @@ const SearchResults = ({ results, naturalResponse, queryInfo, currentPage, total
         return <SearchError error={error} />;
     }
 
+    // Check if we have a text response and no structured results
+    if (typeof naturalResponse === 'string' && naturalResponse) {
+        return (
+            <div className="space-y-6">
+                {/* Natural Language Response Card */}
+                <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg p-6 shadow-sm">
+                    <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4">
+                        AI Recommendations
+                    </h3>
+                    <div className="prose dark:prose-invert max-w-none">
+                        {naturalResponse.split('\n').map((line, i) => (
+                            <p key={i} className="text-gray-700 dark:text-gray-300 mb-2">
+                                {line}
+                            </p>
+                        ))}
+                    </div>
+                </div>
+
+                {/* Query Info */}
+                {queryInfo && (
+                    <div className="text-sm text-gray-500 dark:text-gray-400">
+                        <span>Original Query: {queryInfo.original}</span>
+                        {queryInfo.model_path && (
+                            <>
+                                <span className="mx-2">•</span>
+                                <span>Model: {queryInfo.model_path}</span>
+                            </>
+                        )}
+                    </div>
+                )}
+            </div>
+        );
+    }
+
     return (
         <div className="space-y-6">
             {/* Natural Language Response */}
@@ -432,25 +466,52 @@ export default function ModelSearchComponent() {
                 })
             });
 
-            const data = await response.json();
-
             if (!response.ok) {
-                throw new Error(data.error || 'Search failed');
+                const errorData = await response.json();
+                throw new Error(errorData.error || 'Search failed');
             }
 
-            // Check if the response contains an error message
-            if (data.error) {
-                throw new Error(data.error);
+            // Handle both text and JSON responses
+            const contentType = response.headers.get('content-type');
+            let data;
+
+            if (contentType && contentType.includes('application/json')) {
+                data = await response.json();
+                
+                // Check if it's a text response wrapped in JSON
+                if (typeof data === 'string') {
+                    data = {
+                        text_response: data,
+                        query_info: {
+                            original: searchQuery,
+                            model_path: selectedModel.model_path
+                        }
+                    };
+                }
+            } else {
+                // Handle plain text response
+                const textData = await response.text();
+                data = {
+                    text_response: textData,
+                    query_info: {
+                        original: searchQuery,
+                        model_path: selectedModel.model_path
+                    }
+                };
             }
 
             setSearchResponse({
                 results: data.results || [],
-                naturalResponse: data.natural_response,
-                queryInfo: data.query_info,
-                total: data.total
+                naturalResponse: data.text_response || '',
+                queryInfo: data.query_info || {
+                    original: searchQuery,
+                    model_path: selectedModel.model_path
+                },
+                total: data.total || 0
             });
+
             setCurrentPage(1);
-            setTotalPages(Math.ceil(data.total / 20));
+            setTotalPages(Math.ceil((data.total || 0) / 20));
 
         } catch (err) {
             setSearchError(err.message);
@@ -554,7 +615,7 @@ export default function ModelSearchComponent() {
                         )}
                     </div>
                 </div>
-
+ 
                 {/* Filters */}
                 <div className="col-span-12 lg:col-span-3">
                     {selectedModel && selectedModel.status === 'completed' && (

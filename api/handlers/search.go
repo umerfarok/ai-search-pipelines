@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -96,11 +97,12 @@ type QueryInfo struct {
 }
 
 type SearchResponse struct {
-	Results   []SearchResult `json:"results"`
-	Total     int            `json:"total"`
-	QueryInfo QueryInfo      `json:"query_info"`
-	Page      int            `json:"page,omitempty"`
-	MaxItems  int            `json:"max_items,omitempty"`
+	Results      []SearchResult `json:"results,omitempty"`
+	Total        int            `json:"total,omitempty"`
+	QueryInfo    QueryInfo      `json:"query_info,omitempty"`
+	Page         int            `json:"page,omitempty"`
+	MaxItems     int            `json:"max_items,omitempty"`
+	TextResponse string         `json:"text_response,omitempty"`
 }
 
 func (s *SearchService) Search(c *gin.Context) {
@@ -163,33 +165,35 @@ func (s *SearchService) Search(c *gin.Context) {
 		return
 	}
 
-	// Decode response from Python service
-	var searchResp SearchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&searchResp); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to decode response: %v", err)})
+	// Read the response body
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read response: %v", err)})
 		return
 	}
 
-	// Apply filters if any
-	if len(req.Filters) > 0 {
+	// Try to decode as JSON first
+	var searchResp SearchResponse
+	if err := json.Unmarshal(responseBody, &searchResp); err != nil {
+		// If JSON decoding fails, treat it as a text response
+		searchResp = SearchResponse{
+			TextResponse: string(responseBody),
+			QueryInfo: QueryInfo{
+				Original:  req.Query,
+				ModelPath: req.ModelPath,
+			},
+			Page:     req.Page,
+			MaxItems: req.MaxItems,
+		}
+	}
+
+	// Apply filters if any and if we have structured results
+	if len(req.Filters) > 0 && len(searchResp.Results) > 0 {
 		searchResp.Results = s.applyFilters(searchResp.Results, req.Filters)
+		searchResp.Total = len(searchResp.Results)
 	}
 
-	// Format and return response
-	respData := SearchResponse{
-		Results: searchResp.Results,
-		Total:   len(searchResp.Results),
-		QueryInfo: QueryInfo{
-			Original:  req.Query,
-			Enhanced:  searchResp.QueryInfo.Enhanced,
-			Analysis:  searchResp.QueryInfo.Analysis,
-			ModelPath: req.ModelPath,
-		},
-		Page:     req.Page,
-		MaxItems: req.MaxItems,
-	}
-
-	c.JSON(http.StatusOK, respData)
+	c.JSON(http.StatusOK, searchResp)
 }
 
 func (s *SearchService) getModelConfig(configID string) (*config.ModelConfig, error) {

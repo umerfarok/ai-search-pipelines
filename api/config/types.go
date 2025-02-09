@@ -104,9 +104,10 @@ type SearchResult struct {
 }
 
 type SearchResponse struct {
-	Results    []SearchResult `json:"results"`
-	Total      int            `json:"total"`
-	ConfigInfo ModelConfig    `json:"config_info"`
+	Results      []SearchResult `json:"results,omitempty"`
+	Total        int            `json:"total,omitempty"`
+	ConfigInfo   ModelConfig    `json:"config_info,omitempty"`
+	TextResponse string         `json:"text_response,omitempty"`
 }
 
 type QueuedJob struct {
