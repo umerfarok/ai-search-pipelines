@@ -2,6 +2,7 @@
 RAG-based Search Service with Efficient Model Management
 """
 
+from concurrent.futures import ThreadPoolExecutor
 import os
 import logging
 import threading
@@ -187,6 +188,37 @@ class SearchService:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._initialize_llm()
         self.vector_store = VectorStore()
+        self._initialize_query_expansion()
+
+    def _initialize_query_expansion(self):
+        """Initialize lightweight model for query expansion"""
+        try:
+            self.query_expansion_model = pipeline(
+                "text2text-generation",
+                model="google/flan-t5-small",
+                device=self.device,
+                torch_dtype=(
+                    torch.float16 if torch.cuda.is_available() else torch.float32
+                ),
+            )
+        except Exception as e:
+            logger.warning(f"Query expansion model not loaded: {e}")
+
+    def _expand_query(self, original_query: str) -> str:
+        """Enhance search query with synonyms and related terms"""
+        try:
+            if self.query_expansion_model:
+                expansion_prompt = f"Generate search synonyms for: {original_query}"
+                expanded = self.query_expansion_model(
+                    expansion_prompt,
+                    max_length=50,
+                    num_return_sequences=1,
+                    do_sample=True,
+                )[0]["generated_text"]
+                return f"{original_query} {expanded}"
+        except Exception as e:
+            logger.error(f"Query expansion failed: {e}")
+        return original_query
 
     def _initialize_llm(self):
         try:
@@ -241,6 +273,29 @@ class SearchService:
         except Exception as e:
             logger.error(f"Semantic search failed: {e}")
             return []
+
+    def _format_frontend_response(
+        self, results: List[Dict], generated_text: str
+    ) -> Dict:
+        """Structure response for frontend consumption"""
+        return {
+            "generated_response": generated_text,
+            "results": [
+                {
+                    "product_id": res.get("mongo_id", ""),
+                    "name": res.get("name", "Unknown"),
+                    "price": res.get("metadata", {}).get("discount_price", "N/A"),
+                    "image_url": res.get("metadata", {}).get("image_url", ""),
+                    "score": res.get("score", 0),
+                    "category": res.get("category", ""),
+                }
+                for res in results
+            ],
+            "search_metadata": {
+                "result_count": len(results),
+                "timestamp": datetime.now().isoformat(),
+            },
+        }
 
     def _validate_embedding_model(
         self, collection_name: str, query_embedding: np.ndarray
@@ -352,11 +407,17 @@ class SearchService:
         try:
             relevant_products = []
             for p in products:
-                relevant_products.append({
-                    "name": p.get('name', 'Unknown'),
-                    "price": p.get('metadata', {}).get('discount_price', 'Price not available'),
-                    "ratings": p.get('metadata', {}).get('no_of_ratings', 'No ratings'),
-                })
+                relevant_products.append(
+                    {
+                        "name": p.get("name", "Unknown"),
+                        "price": p.get("metadata", {}).get(
+                            "discount_price", "Price not available"
+                        ),
+                        "ratings": p.get("metadata", {}).get(
+                            "no_of_ratings", "No ratings"
+                        ),
+                    }
+                )
 
             response = "Here are some relevant products:\n\n"
             for p in relevant_products:
@@ -373,67 +434,80 @@ class SearchService:
     def _format_search_result(self, result: Dict) -> Dict:
         """Format search result with corrected field mapping"""
         try:
-            metadata = result.get('metadata', {})
-            custom_metadata = metadata.get('custom_metadata', {})
-            
+            metadata = result.get("metadata", {})
+            custom_metadata = metadata.get("custom_metadata", {})
+
             return {
-                'mongo_id': metadata.get('mongo_id', ''),
-                'score': round(float(result.get('score', 0.0)), 4),
-                'name': metadata.get('name', ''),
-                'description': metadata.get('description', ''),
-                'category': metadata.get('category', ''),
-                'metadata': custom_metadata,  # Contains discount_price and no_of_ratings
-                'qdrant_id': result.get('id', '')
+                "mongo_id": metadata.get("mongo_id", ""),
+                "score": round(float(result.get("score", 0.0)), 4),
+                "name": metadata.get("name", ""),
+                "description": metadata.get("description", ""),
+                "category": metadata.get("category", ""),
+                "metadata": custom_metadata,  # Contains discount_price and no_of_ratings
+                "qdrant_id": result.get("id", ""),
             }
         except Exception as e:
             logger.error(f"Result formatting error: {str(e)}")
             return {"error": "Result formatting failed"}
 
-    def search(self, query: str, model_path: str, top_k: int = 5) -> List[Dict]:
-        """Search with collection verification and error handling"""
+    def search(
+        self, query: str, model_path: str, top_k: int = 5, filters: Dict = None
+    ) -> List[Dict]:
+        """Enhanced search with query expansion and filters"""
         try:
-            # Config ID extraction with validation
-            config_id = model_path.split("/")[-1].strip()
-            if not config_id or len(config_id) != 24:
-                raise ValueError("Invalid model path format")
+            # Query processing improvements
+            query = self._preprocess_query(query)
+            expanded_query = self._expand_query(query)
 
-            collection_name = f"products_{config_id}"
+            # Check cache first
+            cache_key = f"{expanded_query}:{model_path}:{top_k}"
+            if cache_key in self.cache:
+                return self.cache[cache_key]
 
-            # Collection existence check
-            if not self.vector_store.collection_exists(collection_name):
-                raise ValueError(f"Collection {collection_name} not found")
+            # Enhanced search with filters
+            results = self._semantic_search(expanded_query, model_path, top_k)
 
-            # Metadata validation
-            collection_metadata = self.vector_store.get_collection_metadata(
-                collection_name
-            )
-            if not collection_metadata:
-                raise ValueError("Collection metadata missing")
+            # Apply post-filters
+            if filters:
+                results = self._apply_filters(results, filters)
 
-            # Model compatibility check
-            model_name = collection_metadata.get("embedding_model")
-            if not model_name:
-                raise ValueError("Embedding model not specified in metadata")
-
-            # Query processing
-            query_embedding = self.embedding_manager.generate_embedding(
-                [query], model_name
-            )
-            if query_embedding.shape[1] != collection_metadata["embedding_dimension"]:
-                raise ValueError("Embedding dimension mismatch")
-
-            # Search execution
-            results = self.vector_store.search(
-                collection_name=collection_name,
-                query_vector=query_embedding[0].tolist(),
-                limit=top_k,
-            )
-
-            return [self._format_search_result(r) for r in results]
+            # Cache results
+            self.cache[cache_key] = results
+            return results
 
         except Exception as e:
-            logger.error(f"Search failed: {str(e)}")
+            logger.error(f"Enhanced search failed: {str(e)}")
             return []
+
+    def _preprocess_query(self, query: str) -> str:
+        """Clean and normalize search query"""
+        query = query.lower().strip()
+        query = re.sub(r"[^\w\s-]", "", query)  # Remove special chars
+        return query
+
+    def _apply_filters(self, results: List[Dict], filters: Dict) -> List[Dict]:
+        """Apply post-search filters"""
+        filtered = []
+        for res in results:
+            metadata = res.get("metadata", {})
+            match = True
+
+            # Price filtering
+            if "max_price" in filters:
+                price = float(metadata.get("discount_price", 0))
+                if price > filters["max_price"]:
+                    match = False
+
+            # Category filtering
+            if "categories" in filters:
+                if res.get("category", "").lower() not in [
+                    c.lower() for c in filters["categories"]
+                ]:
+                    match = False
+
+            if match:
+                filtered.append(res)
+        return filtered
 
     def _load_products(self, model_path: str) -> Optional[pd.DataFrame]:
         """Load products data from local or S3"""
@@ -496,24 +570,37 @@ search_service = SearchService()
 
 @app.route("/search", methods=["POST"])
 def search():
-    """Enhanced search endpoint with RAG support"""
+    """Enhanced endpoint with frontend support"""
     try:
         data = request.get_json()
+        # Validate input
         if not data or "query" not in data or "model_path" not in data:
             return jsonify({"error": "Missing required fields"}), 400
 
-        results = search_service.search(
-            query=data["query"],
-            model_path=data["model_path"],
-            # max_items=data.get("max_items", 10),
-        )
-        llmResponse = search_service._generate_response(data["query"], results)
-        print(llmResponse)
+        # Process with timeout
+        with ThreadPoolExecutor() as executor:
+            future = executor.submit(
+                search_service.search,
+                query=data["query"],
+                model_path=data["model_path"],
+                top_k=data.get("top_k", 10),
+                filters=data.get("filters", {}),
+            )
+            results = future.result(timeout=5)  # 5 second timeout
 
-        return jsonify(llmResponse)
+    
+        llm_response = search_service._generate_response(data["query"], results)
+        print("llmresponse", llm_response)
+        response = search_service._format_frontend_response(results, llm_response)
+        print(response)
 
+        return jsonify(response)
+
+    except TimeoutError:
+        logger.warning("Search request timed out")
+        return jsonify({"error": "Request timeout"}), 504
     except Exception as e:
-        logger.error(f"Search endpoint error: {str(e)}")
+        logger.error(f"Endpoint error: {str(e)}")
         return jsonify({"error": "Internal server error"}), 500
 
 
