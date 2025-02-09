@@ -22,6 +22,7 @@ import torch
 import json
 from config import AppConfig
 from vector_store import VectorStore
+import re
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
