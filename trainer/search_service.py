@@ -569,7 +569,7 @@ def search():
                 search_service.search,
                 query=data["query"],
                 model_path=data["model_path"],
-                top_k=data.get("top_k", 10),
+                top_k=data.get("top_k", 20),
                 filters=data.get("filters", {}),
             )
             results = future.result(timeout=50)  # 5 second timeout
