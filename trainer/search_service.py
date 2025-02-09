@@ -172,15 +172,15 @@ class SearchService:
         self.vector_store = VectorStore()
 
     def _initialize_llm(self):
-        """Initialize LLM for response generation"""
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(
-                "TheBloke/Mistral-7B-Instruct-v0.2-AWQ", trust_remote_code=True
+                "TheBloke/Mistral-7B-Instruct-v0.1-GPTQ", trust_remote_code=True
             )
             self.llm = AutoModelForCausalLM.from_pretrained(
-                "TheBloke/Mistral-7B-Instruct-v0.2-AWQ",
+                "TheBloke/Mistral-7B-Instruct-v0.1-GPTQ",
                 device_map="auto",
                 trust_remote_code=True,
+                revision="main",
             )
             logger.info("LLM initialized successfully")
         except Exception as e:
