@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 import os
+from dotenv import load_dotenv
 
+load_dotenv()
 
 @dataclass
 class AppConfig:
@@ -223,3 +225,11 @@ class AppConfig:
                 "HF_HUB_DISABLE_TELEMETRY": "1",  # Disable telemetry
             }
         )
+
+    # Vector Database Configuration
+    VECTOR_DB_HOST = os.getenv("VECTOR_DB_HOST", "chromadb")
+    VECTOR_DB_PORT = int(os.getenv("VECTOR_DB_PORT", "8000"))
+
+    # Training Configuration
+    BATCH_SIZE = int(os.getenv("BATCH_SIZE", "128"))
+    MAX_TOKENS = int(os.getenv("MAX_TOKENS", "512"))

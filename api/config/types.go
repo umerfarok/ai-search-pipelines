@@ -50,7 +50,7 @@ type Column struct {
 
 type TrainingConfig struct {
 	ModelType       string            `json:"model_type"`
-	EmbeddingModel  string            `json:"embedding_model"`
+	EmbeddingModel  string            `json:"embeddingmodel"`
 	BatchSize       int               `json:"batch_size"`
 	MaxTokens       int               `json:"max_tokens"`
 	LLMModel        string            `json:"llm_model"` // Add this field for LLM model selection
@@ -59,19 +59,18 @@ type TrainingConfig struct {
 }
 
 type SchemaMapping struct {
-	IDColumn          string         `json:"id_column"`
-	NameColumn        string         `json:"name_column"`
-	DescriptionColumn string         `json:"description_column"`
-	CategoryColumn    string         `json:"category_column"`
-	CustomColumns     []CustomColumn `json:"custom_columns"`
-	RequiredColumns   []string       `json:"required_columns"`
+	Idcolumn          string         `json:"idcolumn" bson:"idcolumn"`
+	Namecolumn        string         `json:"namecolumn" bson:"namecolumn"`
+	Descriptioncolumn string         `json:"descriptioncolumn" bson:"descriptioncolumn"`
+	Categorycolumn    string         `json:"categorycolumn" bson:"categorycolumn"`
+	Customcolumns     []CustomColumn `json:"customcolumns" bson:"customcolumns"` // Update to use CustomColumn struct
 }
 
 type CustomColumn struct {
-	UserColumn     string `json:"user_column"`
-	StandardColumn string `json:"standard_column"`
-	Role           string `json:"role"` // "training", "metadata", "filter"
-	Required       bool   `json:"required"`
+	Name     string `json:"name" bson:"name"`
+	Type     string `json:"type" bson:"type"` // text, number, category, url
+	Role     string `json:"role" bson:"role"` // training, metadata
+	Required bool   `json:"required" bson:"required"`
 }
 
 type TrainingStats struct {
@@ -83,9 +82,9 @@ type TrainingStats struct {
 	ValidationScore  float64 `json:"validation_score,omitempty"`
 	ErrorRate        float64 `json:"error_rate,omitempty"`
 	Progress         float64 `json:"progress"`
-	LLMModel         string  `json:"llm_model,omitempty"`         // Add this field
-	LLMModelName     string  `json:"llm_model_name,omitempty"`    // Add this field
-	CompletedAt      string  `json:"completed_at,omitempty"`      // Add this field
+	LLMModel         string  `json:"llm_model,omitempty"`      // Add this field
+	LLMModelName     string  `json:"llm_model_name,omitempty"` // Add this field
+	CompletedAt      string  `json:"completed_at,omitempty"`   // Add this field
 }
 
 type SearchRequest struct {
@@ -121,7 +120,7 @@ type LLMModelInfo struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 }
- 
+
 var AvailableLLMModels = map[string]LLMModelInfo{
 	"deepseek-coder": {
 		Name:        "DeepSeek Coder 1.3B",

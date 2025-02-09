@@ -1,66 +1,32 @@
 import os
 import logging
 import time
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional
 import requests
 import torch
 import numpy as np
 import json
 from pathlib import Path
 import redis
-from datetime import datetime
+from datetime import datetime  # Fix import - remove the duplicate import
 import threading
 from collections import OrderedDict
-from sentence_transformers import SentenceTransformer, CrossEncoder
-from transformers import AutoTokenizer
-from flask import Flask, request, jsonify
+from sentence_transformers import SentenceTransformer
+from flask import Flask, jsonify
 import boto3
 from botocore.exceptions import ClientError
 from botocore.config import Config
 import pandas as pd
 import io
+import re
 from enum import Enum
-from rank_bm25 import BM25Okapi
-import spacy
-from transformers import pipeline
-from nltk.tokenize import word_tokenize
-import nltk
 from config import AppConfig
-from model_initializer import ModelInitializer
+from vector_store import VectorStore
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-
-
-# Modify spaCy initialization with better error handling
-def initialize_nlp():
-    """Initialize spaCy with fallback options"""
-    try:
-        nltk.data.find("tokenizers/punkt")
-    except LookupError:
-        nltk.download("punkt")
-
-    try:
-        # Try importing directly first
-        import en_core_web_sm
-
-        return en_core_web_sm.load()
-    except ImportError:
-        try:
-            logger.warning("SpaCy model not found. Attempting to download...")
-            os.system("python -m spacy download en_core_web_sm")
-            import en_core_web_sm
-
-            return en_core_web_sm.load()
-        except Exception as e:
-            logger.error(f"Failed to initialize spaCy: {e}")
-            # Return a minimal pipeline that won't break the application
-            return spacy.blank("en")
-
-
-nlp = initialize_nlp()
 
 
 class ModelStatus(Enum):
@@ -70,111 +36,6 @@ class ModelStatus(Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELED = "canceled"
-
-
-class QueryUnderstanding:
-    def __init__(self):
-        self.intent_classifier = pipeline(
-            "zero-shot-classification", model="facebook/bart-large-mnli"
-        )
-        self.nlp = nlp
-        self.domain_keywords = AppConfig.DOMAIN_KEYWORDS
-
-    def analyze(self, query: str) -> Dict:
-        try:
-            # Fallback intent classification if NLP fails
-            intent = {"labels": [], "scores": []}
-            entities = []
-
-            try:
-                # Intent classification
-                intent = self.intent_classifier(
-                    query,
-                    candidate_labels=list(self.domain_keywords.keys()),
-                    multi_label=True,
-                )
-
-                # Entity recognition
-                doc = self.nlp(query)
-                entities = [(ent.text, ent.label_) for ent in doc.ents]
-            except Exception as e:
-                logger.warning(f"Advanced query analysis failed: {e}")
-
-            # Continue with basic keyword matching even if advanced analysis fails
-            expanded_terms = []
-            for label in intent.get("labels", []):
-                if intent.get("scores", [0])[intent["labels"].index(label)] > 0.5:
-                    expanded_terms.extend(self.domain_keywords.get(label, []))
-
-            return {
-                "intent": intent.get("labels", []),
-                "intent_scores": intent.get("scores", []),
-                "entities": entities,
-                "expanded_terms": list(set(expanded_terms)),
-                "original_query": query,
-            }
-        except Exception as e:
-            logger.error(f"Query analysis failed: {e}")
-            return {
-                "intent": [],
-                "intent_scores": [],
-                "entities": [],
-                "expanded_terms": [],
-                "original_query": query,
-            }
-
-
-class HybridSearchEngine:
-    def __init__(self):
-        self.bm25 = None
-        self.tokenized_corpus = None
-        self.reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-
-    def initialize(self, texts: List[str]):
-        """Initialize BM25 with corpus"""
-        self.tokenized_corpus = [word_tokenize(text.lower()) for text in texts]
-        self.bm25 = BM25Okapi(self.tokenized_corpus)
-
-    def hybrid_search(
-        self, query: str, semantic_scores: np.ndarray, alpha: float = 0.7
-    ) -> np.ndarray:
-        """Combine BM25 and semantic search scores"""
-        if not query.strip():
-            return np.zeros_like(semantic_scores)
-
-        tokenized_query = word_tokenize(query.lower())
-        if not tokenized_query:
-            return np.zeros_like(semantic_scores)
-
-        bm25_scores = np.array(self.bm25.get_scores(tokenized_query))
-
-        # Safe normalization
-        bm25_range = bm25_scores.max() - bm25_scores.min()
-        semantic_range = semantic_scores.max() - semantic_scores.min()
-
-        if bm25_range > 0:
-            bm25_scores = (bm25_scores - bm25_scores.min()) / bm25_range
-        if semantic_range > 0:
-            semantic_scores = (semantic_scores - semantic_scores.min()) / semantic_range
-
-        combined_scores = alpha * semantic_scores + (1 - alpha) * bm25_scores
-        return combined_scores
-
-    def rerank(self, query: str, candidates: List[Dict], top_k: int = 10) -> List[Dict]:
-        """Rerank results using cross-encoder"""
-        if not candidates:
-            return []
-
-        pairs = [(query, doc["text"]) for doc in candidates]
-        scores = self.reranker.predict(pairs)
-
-        # Add rerank scores to candidates
-        for i, score in enumerate(scores):
-            candidates[i]["rerank_score"] = float(score)
-
-        # Sort by rerank score
-        reranked = sorted(candidates, key=lambda x: x["rerank_score"], reverse=True)
-        return reranked[:top_k]
 
 
 class ModelCache:
@@ -411,6 +272,8 @@ class EmbeddingManager:
 
 class ProductTrainer:
     def __init__(self):
+        self.default_embedding_model = "sentence-transformers/all-MiniLM-L6-v2"
+        self.vector_store = VectorStore()
         self.embedding_manager = EmbeddingManager()
         self.s3_manager = S3Manager()
         self.domain_processors = {
@@ -418,6 +281,8 @@ class ProductTrainer:
             "tech": self._enhance_tech_text,
             "general": self._enhance_general_text,
         }
+        self._id_counter = 0
+        self._id_cache = {}
 
     def _enhance_food_text(self, text: str, metadata: Dict) -> str:
         """Enhance food product text with domain-specific information"""
@@ -439,35 +304,27 @@ class ProductTrainer:
         """Default text enhancement"""
         return text
 
-    def _process_text(self, row: pd.Series, schema: Dict, config: Dict) -> str:
-        """Enhanced text processing with domain-specific handling"""
-        # Basic text assembly
-        text_parts = []
+    def _process_text(self, row: pd.Series, schema: Dict) -> str:
+        """Enhanced text processing with custom columns"""
+        try:
+            # Process core fields
+            text_parts = [
+                str(row[schema[f"{field}column"]])
+                for field in ["name", "description", "category"]
+                if schema.get(f"{field}column") in row
+            ]
 
-        # Process core fields
-        for field in ["name", "description", "category"]:
-            col = schema.get(f"{field}column")
-            if col and col in row:
-                text_parts.append(str(row[col]))
+            # Process training custom columns
+            if "customcolumns" in schema:
+                for col in schema["customcolumns"]:
+                    if col.get("role") == "training" and col["name"] in row:
+                        text_parts.append(str(row[col["name"]]))
 
-        # Join base text
-        base_text = " ".join(filter(None, text_parts))
+            return " ".join(filter(None, text_parts))
 
-        # Get domain-specific processor
-        domain = config.get("domain", "general")
-        domain_processor = self.domain_processors.get(
-            domain, self._enhance_general_text
-        )
-
-        # Create metadata dict for domain processing
-        metadata = {}
-        if "customcolumns" in schema:
-            for col in schema["customcolumns"]:
-                if col["name"] in row:
-                    metadata[col["name"]] = str(row[col["name"]])
-
-        # Apply domain-specific enhancements
-        return domain_processor(base_text, metadata)
+        except Exception as e:
+            logger.error(f"Error processing text: {e}")
+            return " ".join(filter(None, text_parts[:3]))  # Return basic text if error
 
     def _load_data(self, config: Dict) -> Optional[pd.DataFrame]:
         try:
@@ -500,129 +357,105 @@ class ProductTrainer:
             logger.error(f"Error loading data: {str(e)}")
             raise
 
-    def train(self, job: Dict) -> bool:
-        """
-        Enhanced training function with better error handling and progress tracking
-        """
+    def _process_metadata(self, row: pd.Series, schema: Dict, config_id) -> Dict:
+        """Process metadata using MongoDB _id directly"""
         try:
-            config = job
-            config_id = config.get("_id")
-            print(config, "====================")
-            if not config_id:
-                raise ValueError("Missing config ID in job")
+            mongo_id = str(config_id)
 
-            logger.info(f"Starting training for config: {config_id}")
+            return {
+                "mongo_id": mongo_id,
+                "id": str(row.get(schema["idcolumn"], "")),
+                "name": str(row.get(schema["namecolumn"], "")),
+                "description": str(row.get(schema["descriptioncolumn"], "")),
+                "category": str(row.get(schema["categorycolumn"], "")),
+                "custom_metadata": {
+                    col["name"]: str(row[col["name"]])
+                    for col in schema.get("customcolumns", [])
+                    if col["name"] in row
+                },
+            }
 
-            # Load and validate data
-            df = self._load_data(config)
-            if df is None or len(df) == 0:
-                raise ValueError("No valid training data found")
-            schema = config.get("schema_mapping", {})
-            required_columns = [
-                schema.get("idcolumn"),
-                schema.get("namecolumn"),
-                schema.get("descriptioncolumn"),
-                schema.get("categorycolumn"),
-            ]
-            print(required_columns)
-            print(schema)
+        except Exception as e:
+            logger.error(f"Metadata processing failed: {str(e)}")
+            raise
 
-            missing_columns = [col for col in required_columns if col not in df.columns]
-            if missing_columns:
-                raise ValueError(f"Missing required columns: {missing_columns}")
+    def train(self, job: Dict) -> bool:
+        """Enhanced training with improved ID handling"""
+        try:
+            config_id = (
+                job["_id"]["$oid"] if isinstance(job["_id"], dict) else job["_id"]
+            )
+            collection_name = f"products_{config_id}"
+            schema = job["schema_mapping"]
 
-            # Get model configuration
-            model_name = config["training_config"]["embedding_model"]
-            expected_dimension = self.embedding_manager.get_model_dimension(model_name)
+            # Load and process data
+            df = self._load_data(job)
+            if df.empty:
+                raise ValueError("Empty dataset after loading")
 
-            # Process texts with enhanced schema mapping
-            processed_texts = []
-            total_rows = len(df)
-            embeddings_list = []
-            processed = 0
-            chunk_size = min(1000, max(100, total_rows // 10))  # Dynamic chunk size
 
-            # Process in chunks
-            for i in range(0, total_rows, chunk_size):
-                chunk_df = df.iloc[i : i + chunk_size]
+            # Generate embeddings
+            model_name = job["training_config"]["embeddingmodel"]
+            expected_dim = self.embedding_manager.get_model_dimension(model_name)
+            texts = df.apply(
+                lambda row: self._process_text(row, schema), axis=1
+            ).tolist()
+            embeddings = self.embedding_manager.generate_embedding(texts, model_name)
 
-                # Process texts for current chunk
-                chunk_texts = []
-                for _, row in chunk_df.iterrows():
-                    try:
-                        processed_text = self._process_text(
-                            row, config["schema_mapping"], config
-                        )
-                        chunk_texts.append(processed_text)
-                    except Exception as e:
-                        logger.warning(f"Error processing text for row: {e}")
-                        chunk_texts.append("")  # Use empty string as fallback
+            # Create collection with metadata
+            if not self.vector_store.create_collection(
+                collection_name,
+                {
+                    "config_id": config_id,
+                    "embedding_model": model_name,
+                    "embedding_dimension": expected_dim,
+                    "schema_version": job.get("version", "1.0"),
+                    "record_count": len(df),
+                    "created_at": datetime.now().isoformat(),
+                },
+            ):
+                raise RuntimeError("Collection setup failed")
 
-                processed_texts.extend(chunk_texts)
+            # Process metadata and store vectors
+            metadata_list = []
+            valid_ids = []
 
-                # Generate embeddings for chunk
+            for _, row in df.iterrows():
                 try:
-                    chunk_embeddings = self.embedding_manager.generate_embedding(
-                        chunk_texts, model_name
-                    )
-
-                    # Verify dimensions
-                    if chunk_embeddings.shape[1] != expected_dimension:
-                        raise ValueError(
-                            f"Generated embedding dimension {chunk_embeddings.shape[1]} "
-                            f"doesn't match expected dimension {expected_dimension}"
-                        )
-
-                    embeddings_list.append(chunk_embeddings)
-
+                    metadata = self._process_metadata(row, schema, config_id)
+                    metadata_list.append(metadata)
                 except Exception as e:
-                    logger.error(f"Error generating embeddings for chunk: {e}")
-                    raise
+                    logger.error(f"Skipping invalid row: {str(e)}")
+                    continue
 
-                processed += len(chunk_df)
-                progress = (processed / total_rows) * 100
-                logger.info(f"Processing progress: {progress:.2f}%")
-
-                # Clear CUDA cache if using GPU
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-
-            # Combine all embeddings
-            embeddings_array = np.vstack(embeddings_list)
-
-            # Verify final embeddings shape
-            if (
-                embeddings_array.shape[0] != len(df)
-                or embeddings_array.shape[1] != expected_dimension
+            # Store vectors with normalized IDs
+            if not self.vector_store.upsert_vectors(
+                collection_name, embeddings, metadata_list, valid_ids
             ):
-                raise ValueError(
-                    f"Final embeddings shape {embeddings_array.shape} doesn't match "
-                    f"expected shape ({len(df)}, {expected_dimension})"
-                )
+                raise RuntimeError("Vector storage failed")
 
-            # Save and upload files
-            model_path = f"models/{config_id}"
-            model_dir = os.path.join(AppConfig.BASE_MODEL_DIR, model_path)
-
-            if not self._save_model_files(
-                model_dir,
-                embeddings_array,
-                df,
-                config,
-                processed_texts,
-                expected_dimension,
-            ):
-                raise Exception("Failed to save model files")
-
-            if not self._upload_model_files(model_dir, model_path):
-                raise Exception("Failed to upload model files")
-
-            logger.info(f"Training completed successfully for config: {config_id}")
             return True
 
         except Exception as e:
-            logger.error(f"Training failed: {str(e)}")
+            logger.error(f"Training pipeline failed: {str(e)}")
             raise
+
+    def _validate_embeddings(self, embeddings: np.ndarray, model_name: str) -> bool:
+        """Enhanced embedding validation"""
+        if not isinstance(embeddings, np.ndarray):
+            logger.error("Embeddings not numpy array")
+            return False
+
+        if embeddings.dtype != np.float32:
+            logger.error("Embeddings not float32")
+            return False
+
+        expected_dim = self.embedding_manager.get_model_dimension(model_name)
+        if embeddings.shape[1] != expected_dim:
+            logger.error(f"Dimension mismatch: {embeddings.shape[1]} vs {expected_dim}")
+            return False
+
+        return True
 
     def _save_model_files(
         self,
@@ -685,6 +518,23 @@ class ProductTrainer:
             logger.error(f"Error saving model files: {e}")
             return False
 
+    def _save_embeddings(self, model_dir: str, embeddings: np.ndarray) -> bool:
+        """Save embeddings with validation"""
+        try:
+            # Save embeddings
+            embeddings_path = os.path.join(model_dir, "embeddings.npy")
+            np.save(embeddings_path, embeddings)
+
+            # Verify saved embeddings
+            loaded_embeddings = np.load(embeddings_path)
+            if not np.array_equal(embeddings, loaded_embeddings):
+                raise ValueError("Embedding verification failed after saving")
+
+            return True
+        except Exception as e:
+            logger.error(f"Error saving embeddings: {e}")
+            return False
+
     def _upload_model_files(self, local_dir: str, model_path: str) -> bool:
         try:
             files = [
@@ -735,23 +585,11 @@ class TrainingWorker:
 
             if not config_id:
                 raise ValueError("Invalid job structure - missing config ID")
-            print(job, "====================")
+
             logger.info(f"Processing job for config: {config_id}")
             self._update_status(config_id, ModelStatus.PROCESSING, progress=0)
 
-            # # Validate schema mapping
-            # if not self._validate_schema_mapping(config):
-            #     raise ValueError("Invalid schema mapping configuration")
-
-            # Convert schema mapping keys to match expected format
-            config["schema_mapping"] = {
-                "idcolumn": config["schema_mapping"].get("id_column"),
-                "namecolumn": config["schema_mapping"].get("name_column"),
-                "descriptioncolumn": config["schema_mapping"].get("description_column"),
-                "categorycolumn": config["schema_mapping"].get("category_column"),
-                "customcolumns": config["schema_mapping"].get("custom_columns", []),
-            }
-
+            # Use schema mapping directly without conversion
             success = self.trainer.train(config)
 
             if success:
@@ -911,24 +749,6 @@ def get_available_models():
     )
 
 
-@app.route("/models/update", methods=["POST"])
-def update_available_models():
-    """Update available models configuration"""
-    try:
-        data = request.get_json()
-        if not data or "models" not in data:
-            return jsonify({"error": "Invalid request"}), 400
-
-        # Update models configuration
-        AppConfig.MODEL_MAPPINGS.update(data["models"])
-        if "default_model" in data:
-            AppConfig.DEFAULT_MODEL = data["default_model"]
-
-        return jsonify({"status": "success"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
 @app.route("/health")
 def health():
     """Health check endpoint"""
@@ -954,71 +774,19 @@ def health():
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
 
-@app.route("/status/<config_id>")
-def get_status(config_id):
-    """Get training status"""
-    try:
-        status_key = f"{AppConfig.MODEL_STATUS_PREFIX}{config_id}"
-        status = worker.redis.get(status_key)
-
-        if status:
-            return jsonify(json.loads(status))
-
-        if worker.current_job and worker.current_job["_id"]["$oid"] == config_id:
-            return jsonify(
-                {
-                    "status": ModelStatus.PROCESSING.value,
-                    "timestamp": datetime.now().isoformat(),
-                }
-            )
-    except Exception as e:
-        return jsonify({"error": "Status not found"}), 404
-
-
-@app.route("/control/start", methods=["POST"])
-def start_worker():
-    """Start the training worker"""
-    try:
-        worker.start()
-        return jsonify({"status": "started"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/control/stop", methods=["POST"])
-def stop_worker():
-    """Stop the training worker"""
-    try:
-        worker.stop()
-        return jsonify({"status": "stopped"})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-model_manager = ModelInitializer()
-
-
 def initialize_service():
     """Initialize all service components"""
     logger.info("Initializing service...")
-
-
-    # Initialize models
-    if not model_manager.initialize_all():
-        logger.error("Failed to initialize models")
-        return False
 
     # Start worker
     worker.start()
 
     logger.info("Service initialization completed")
-    return True 
+    return True
 
 
 if __name__ == "__main__":
     print("Starting Train service...")
     if not initialize_service():
         logger.error("Service initialization failed")
-
-    # Run Flask app
     app.run(host="0.0.0.0", port=AppConfig.SERVICE_PORT, use_reloader=False)

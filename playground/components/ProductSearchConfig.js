@@ -1,3 +1,4 @@
+"use client";
 import React, { useState, useCallback, useEffect } from "react";
 import {
     AlertCircle, Upload, CheckCircle2, XCircle,
@@ -137,16 +138,16 @@ const useModelConfig = () => {
             columns: [],
         },
         schema_mapping: {
-            id_column: "",
-            name_column: "",
-            description_column: "",
-            category_column: "",
-            custom_columns: [],
+            idcolumn: "",
+            namecolumn: "",
+            descriptioncolumn: "",
+            categorycolumn: "",
+            customcolumns: [],
             required_columns: [],
         },
         training_config: {
             model_type: "transformer",
-            embedding_model: DEFAULT_MODEL,
+            embeddingmodel: DEFAULT_MODEL,
             batch_size: 32,
             max_tokens: 512,
             validation_split: 0.2
@@ -163,7 +164,7 @@ const useModelConfig = () => {
                 ...config,
                 training_config: {
                     ...config.training_config,
-                    embedding_model: getModelPath(config.training_config.embedding_model)
+                    embeddingmodel: getModelPath(config.training_config.embeddingmodel)
                 }
             };
 
@@ -519,33 +520,44 @@ const ModelList = ({ onSelect, selectedConfigId }) => {
 const CustomColumnConfig = ({ columns, onUpdate, availableColumns }) => {
     const [showForm, setShowForm] = useState(false);
     const [newColumn, setNewColumn] = useState({
-        user_column: '',
-        standard_column: '',
-        role: 'training',
+        name: '',
+        type: 'text',
+        role: 'metadata',
         required: false
     });
 
     const roles = [
-        { value: 'training', label: 'Training Data' },
-        { value: 'metadata', label: 'Metadata Only' }
+        { value: 'metadata', label: 'Metadata Only' },
+        { value: 'training', label: 'Training Data' }
+    ];
+
+    const columnTypes = [
+        { value: 'text', label: 'Text' },
+        { value: 'number', label: 'Number' },
+        { value: 'category', label: 'Category' },
+        { value: 'url', label: 'URL' }
     ];
 
     const handleAdd = () => {
-        if (!newColumn.user_column || !newColumn.standard_column) return;
+        if (!newColumn.name) {
+            return;
+        }
 
-        onUpdate([...columns, newColumn]);
+        const updatedColumns = [...columns, {
+            name: newColumn.name,
+            type: newColumn.type,
+            role: newColumn.role,
+            required: newColumn.required
+        }];
+
+        onUpdate(updatedColumns);
         setNewColumn({
-            user_column: '',
-            standard_column: '',
-            role: 'training',
+            name: '',
+            type: 'text',
+            role: 'metadata',
             required: false
         });
         setShowForm(false);
-    };
-
-    const handleRemove = (index) => {
-        const updatedColumns = columns.filter((_, idx) => idx !== index);
-        onUpdate(updatedColumns);
     };
 
     return (
@@ -569,14 +581,17 @@ const CustomColumnConfig = ({ columns, onUpdate, availableColumns }) => {
                     {columns.map((col, idx) => (
                         <div key={idx} className="flex items-center justify-between p-2 bg-gray-50 rounded-lg">
                             <div className="space-y-1">
-                                <div className="text-sm font-medium">{col.standard_column}</div>
+                                <div className="text-sm font-medium">{col.name}</div>
                                 <div className="text-xs text-gray-500">
-                                    Maps to: {col.user_column} • Role: {col.role}
+                                    Type: {col.type} • Role: {col.role}
                                     {col.required && ' • Required'}
                                 </div>
                             </div>
                             <button
-                                onClick={() => handleRemove(idx)}
+                                onClick={() => {
+                                    const updatedColumns = columns.filter((_, i) => i !== idx);
+                                    onUpdate(updatedColumns);
+                                }}
                                 className="text-red-500 hover:text-red-700"
                             >
                                 <Trash2 className="w-4 h-4" />
@@ -590,17 +605,17 @@ const CustomColumnConfig = ({ columns, onUpdate, availableColumns }) => {
             {showForm && (
                 <div className="border rounded-lg p-4 space-y-4">
                     <Select
-                        label="CSV Column"
-                        value={newColumn.user_column}
-                        onChange={(e) => setNewColumn(prev => ({ ...prev, user_column: e.target.value }))}
+                        label="Column Name"
+                        value={newColumn.name}
+                        onChange={(e) => setNewColumn(prev => ({ ...prev, name: e.target.value }))}
                         options={availableColumns.map(col => ({ value: col, label: col }))}
                     />
 
-                    <Input
-                        label="Standard Name"
-                        value={newColumn.standard_column}
-                        onChange={(e) => setNewColumn(prev => ({ ...prev, standard_column: e.target.value }))}
-                        placeholder="e.g., brand, color, size"
+                    <Select
+                        label="Column Type"
+                        value={newColumn.type}
+                        onChange={(e) => setNewColumn(prev => ({ ...prev, type: e.target.value }))}
+                        options={columnTypes}
                     />
 
                     <Select
@@ -650,7 +665,7 @@ const SchemaMapping = ({ config, setConfig, csvHeaders, validationErrors }) => {
             ...prev,
             schema_mapping: {
                 ...prev.schema_mapping,
-                custom_columns: columns
+                customcolumns: columns
             }
         }));
     };
@@ -665,12 +680,12 @@ const SchemaMapping = ({ config, setConfig, csvHeaders, validationErrors }) => {
                 <Select
                     key={field}
                     label={`${field.charAt(0).toUpperCase() + field.slice(1)} Column`}
-                    value={config.schema_mapping[`${field}_column`]}
+                    value={config.schema_mapping[`${field}column`]}
                     onChange={(e) => setConfig(prev => ({
                         ...prev,
                         schema_mapping: {
                             ...prev.schema_mapping,
-                            [`${field}_column`]: e.target.value
+                            [`${field}column`]: e.target.value
                         }
                     }))}
                     options={csvHeaders.map(header => ({
@@ -683,7 +698,7 @@ const SchemaMapping = ({ config, setConfig, csvHeaders, validationErrors }) => {
 
             {/* Custom Columns */}
             <CustomColumnConfig
-                columns={config.schema_mapping.custom_columns || []}
+                columns={config.schema_mapping.customcolumns || []}
                 onUpdate={handleCustomColumnsUpdate}
                 availableColumns={csvHeaders}
             />
@@ -740,7 +755,7 @@ export default function ProductSearchConfig() {
                 training_config: {
                     ...prev.training_config,
                     model_type: "transformer",
-                    embedding_model: "all-minilm-l6",
+                    embeddingmodel: "all-minilm-l6",
                     batch_size: 128,
                     max_tokens: 512,
                 }
@@ -879,12 +894,12 @@ export default function ProductSearchConfig() {
                     >
                         <Select
                             label="Embedding Model"
-                            value={config.training_config?.embedding_model}
+                            value={config.training_config?.embeddingmodel}
                             onChange={(e) => setConfig(prev => ({
                                 ...prev,
                                 training_config: {
                                     ...prev.training_config,
-                                    embedding_model: e.target.value
+                                    embeddingmodel: e.target.value
                                 }
                             }))}
                             options={Object.entries(MODEL_MAPPINGS).map(([key, model]) => ({
@@ -898,7 +913,7 @@ export default function ProductSearchConfig() {
                         <div className="mt-4">
                             <h4 className="text-sm font-medium text-gray-700 mb-2">Model Features</h4>
                             <div className="flex flex-wrap gap-2">
-                                {MODEL_MAPPINGS[config.training_config?.embedding_model]?.tags.map((tag) => (
+                                {MODEL_MAPPINGS[config.training_config?.embeddingmodel]?.tags.map((tag) => (
                                     <span key={tag} className="px-2 py-1 bg-blue-100 text-blue-800 rounded-full text-xs">
                                         {tag}
                                     </span>
@@ -1042,7 +1057,7 @@ export default function ProductSearchConfig() {
                                         <div className="bg-gray-50 p-3 rounded-lg">
                                             <span className="text-xs text-gray-500">Embedding Model</span>
                                             <p className="text-sm font-medium text-gray-900">
-                                                {config.training_config.embedding_model}
+                                                {config.training_config.embeddingmodel}
                                             </p>
                                         </div>
                                     </div>

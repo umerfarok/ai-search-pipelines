@@ -1,7 +1,7 @@
 import ChatBot from './ChatBot';
 import Link from 'next/link';
 import { useRouter } from 'next/router';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Menu, X, Search, Plus, Clock, Home, List, User, Sun, Moon } from 'lucide-react';
 import { useTheme } from 'next-themes';
 
@@ -9,8 +9,13 @@ export default function NavBar() {
     const [isOpen, setIsOpen] = useState(false);
     const router = useRouter();
     const { theme, setTheme } = useTheme();
+    const [mounted, setMounted] = useState(false);
 
-    const navItems = [
+    useEffect(() => {
+        setMounted(true);
+    }, []);
+
+    const navItems = [ 
         { href: '/search', label: 'Search Models', icon: Search },
         { href: '/create-config', label: 'Create Config', icon: Plus },
         { href: '/pending-jobs', label: 'Pending Jobs', icon: Clock },
@@ -18,6 +23,24 @@ export default function NavBar() {
     ];
 
     const isActive = (path) => router.pathname === path;
+
+    const renderThemeToggle = () => {
+        if (!mounted) return null;
+        
+        return (
+            <button
+                onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+                className="p-2 rounded-md text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/60 transition-colors"
+                aria-label="Toggle theme"
+            >
+                {theme === 'dark' ? (
+                    <Sun className="h-5 w-5" />
+                ) : (
+                    <Moon className="h-5 w-5" />
+                )}
+            </button>
+        );
+    };
 
     return (
         <nav className="sticky top-0 z-50 w-full border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-sm">
@@ -50,31 +73,12 @@ export default function NavBar() {
                         ))}
 
                         {/* Theme Toggle */}
-                        <button
-                            onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-                            className="p-2 rounded-md text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800/60 transition-colors"
-                            aria-label="Toggle theme"
-                        >
-                            {theme === 'dark' ? (
-                                <Sun className="h-5 w-5" />
-                            ) : (
-                                <Moon className="h-5 w-5" />
-                            )}
-                        </button>
+                        {renderThemeToggle()}
                     </div>
 
                     {/* Mobile Menu Button */}
                     <div className="flex md:hidden items-center space-x-2">
-                        <button
-                            onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-                            className="p-2 rounded-md text-gray-600 dark:text-gray-300"
-                        >
-                            {theme === 'dark' ? (
-                                <Sun className="h-5 w-5" />
-                            ) : (
-                                <Moon className="h-5 w-5" />
-                            )}
-                        </button>
+                        {renderThemeToggle()}
                         <button
                             onClick={() => setIsOpen(!isOpen)}
                             className="inline-flex items-center justify-center p-2 rounded-md text-gray-600 dark:text-gray-300

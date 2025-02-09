@@ -405,25 +405,18 @@ func validateConfig(config *cfg.ModelConfig) error {
 		return fmt.Errorf("previous_version is required for append mode")
 	}
 
-	if config.SchemaMapping.NameColumn == "" {
-		return fmt.Errorf("schema_mapping.name_column is required")
+	// Updated field names
+	if config.SchemaMapping.Namecolumn == "" {
+		return fmt.Errorf("schema_mapping.namecolumn is required")
 	}
 
-	if config.SchemaMapping.IDColumn == "" {
-		return fmt.Errorf("schema_mapping.id_column is required")
+	if config.SchemaMapping.Idcolumn == "" {
+		return fmt.Errorf("schema_mapping.idcolumn is required")
 	}
 
 	// Set default values
 	if config.TrainingConfig.BatchSize == 0 {
 		config.TrainingConfig.BatchSize = 128
-	}
-
-	if config.TrainingConfig.MaxTokens == 0 {
-		config.TrainingConfig.MaxTokens = 512
-	}
-
-	if config.TrainingConfig.ValidationSplit == 0 {
-		config.TrainingConfig.ValidationSplit = 0.2
 	}
 
 	return nil
@@ -485,9 +478,9 @@ func (s *ConfigService) GetQueuedJobs(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to get queue length: %v", err)})
 		return
 	}
- 
+
 	if queueLen == 0 {
-		c.JSON(http.StatusOK, gin.H{ 
+		c.JSON(http.StatusOK, gin.H{
 			"count": 0,
 			"jobs":  []interface{}{},
 		})
@@ -510,7 +503,7 @@ func (s *ConfigService) GetQueuedJobs(c *gin.Context) {
 		jobs = append(jobs, job)
 	}
 
-	c.JSON(http.StatusOK, gin.H{ 
+	c.JSON(http.StatusOK, gin.H{
 		"count": len(jobs),
 		"jobs":  jobs,
 	})

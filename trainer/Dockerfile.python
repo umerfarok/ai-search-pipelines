@@ -1,31 +1,51 @@
 ARG BASE_IMAGE=ml-base:latest
-FROM ${BASE_IMAGE} as base
+FROM ${BASE_IMAGE}
 
-# Create directories without user permissions
-RUN mkdir -p /app/cache/{transformers,huggingface,datasets,torch,models,nltk_data} && \
-    mkdir -p /app/shared_models
+# Ensure Python environment is properly set
+ENV PATH="/usr/local/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
 
-RUN pip3 uninstall numpy -y
+# Verify Python installation
+RUN python3 --version && pip3 --version
 
-# Install dependencies
+# Create directories
+RUN mkdir -p /app/cache/{transformers,huggingface,datasets,torch,models,nltk_data} \
+    && mkdir -p /app/tmp \
+    && chmod -R 777 /app/tmp
+
+# Install FAISS and Redis
+RUN pip install faiss-cpu redis
+
+COPY requirements.txt . 
+RUN pip install --no-cache-dir \
+    autoawq==0.2.0 \
+    einops==0.7.0 \
+    flask==3.0.2 \
+    triton \
+    -r requirements.txt
+    
+# Install spacy model separately
+# RUN python3 -m pip install spacy && \
+#     python3 -m spacy download en_core_web_sm
+
+# # Download NLTK data
+# RUN python3 -c "import nltk; nltk.download('punkt')"
+
+# Copy application code
 COPY . .
-RUN pip3 install --no-cache-dir -r requirements.service.txt && \
-    python -m spacy validate
 
-WORKDIR /app
-
-# Set cache environment variables
+# Set environment variables
 ENV TRANSFORMERS_CACHE="/app/cache/transformers" \
     HF_HOME="/app/cache/huggingface" \
     TORCH_HOME="/app/cache/torch" \
     XDG_CACHE_HOME="/app/cache" \
     HF_DATASETS_CACHE="/app/cache/datasets" \
     MODEL_CACHE_DIR="/app/cache/models" \
-    NLTK_DATA="/app/cache/nltk_data"
+    NLTK_DATA="/app/cache/nltk_data" \
+    PYTHONPATH="/app"
 
-# Copy application files
-FROM base as prod
-COPY . .
-
-CMD ["python3", "app.py"]
+# Set working directory and default command
+WORKDIR /app
+CMD ["python", "search_service.py"]
 

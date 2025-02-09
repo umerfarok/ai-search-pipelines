@@ -31,7 +31,7 @@ const JobCard = ({ job, index }) => (
                 <h4 className="text-sm font-medium text-gray-700 dark:text-gray-300">Configuration</h4>
                 <div className="text-sm space-y-1.5 text-gray-600 dark:text-gray-400">
                     <p>Mode: {job.config.mode}</p>
-                    <p>Model: {job.config.training_config.embedding_model.split('/').pop()}</p>
+                    <p>Model: {job.config.training_config.embeddingmodel.split('/').pop()}</p>
                     <p>Batch Size: {job.config.training_config.batch_size}</p>
                     <p className="truncate">Path: {job.config.model_path}</p>
                     {job.config.previous_version && (

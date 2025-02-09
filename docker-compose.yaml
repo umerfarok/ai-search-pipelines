@@ -26,9 +26,6 @@ services:
     depends_on:
       - mongo
       - redis
-      - training-service
-    env_file:
-      - .env
     networks:
       - app-network
 
@@ -37,27 +34,30 @@ services:
       context: ./trainer
       dockerfile: Dockerfile.python
     environment:
-      # Unified cache configuration
       TRANSFORMERS_CACHE: /app/cache/transformers
       HF_HOME: /app/cache/huggingface
       TORCH_HOME: /app/cache/torch
-      XDG_CACHE_HOME: /app/cache
-      # Model storage
       MODEL_STORAGE_DIR: /app/models
-      # AWS configuration
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
       AWS_ACCESS_KEY: test
       AWS_SECRET_KEY: test
       S3_BUCKET: local-bucket
       AWS_REGION: us-east-1
       AWS_ENDPOINT_URL: http://localstack:4566
-      # GPU configuration
-      NVIDIA_VISIBLE_DEVICES: all
       NLTK_DATA: /app/cache/nltk_data
-    command: ["python", "search_service.py"]
+      SQLITE_TMPDIR: /app/tmp
+      PYTHONUNBUFFERED: 1
+      CHROMA_CLIENT_AUTH_PROVIDER: chromadb.auth.basic.BasicAuthClientProvider
+      CHROMA_CLIENT_AUTH_CREDENTIALS: admin:admin
+      CHROMA_CLIENT_AUTH_TOKEN_HEADER: X-Chroma-Token
+      IS_PERSISTENT: "TRUE"
+    command: ["python3", "search_service.py"]
     volumes:
-      - ./cache:/app/cache:rw  # Add explicit read-write flag
-      - ./models:/app/models:rw  # Add explicit read-write flag
-      - ./cache/nltk_data:/app/cache/nltk_data:rw
+      - ./cache:/app/cache:rw
+      - ./models:/app/models:rw
+      - ./cache/nltk_data:/app/cache/nltk_data:rw  
+      - ./tmp:/app/tmp:rw
     deploy:
       resources:
         reservations:
@@ -66,13 +66,11 @@ services:
               count: 1
               capabilities: [gpu]
     runtime: nvidia
+    depends_on:
+      redis:
+        condition: service_healthy
     networks:
       - app-network
-    env_file:
-      - .env
-    depends_on:
-      - redis
-      - ml-base
 
   ml-base:
     build:
@@ -85,13 +83,12 @@ services:
       context: ./trainer
       dockerfile: Dockerfile.python
     environment:
-      # Shared cache configuration
       TRANSFORMERS_CACHE: /app/cache/transformers
       HF_HOME: /app/cache/huggingface
       TORCH_HOME: /app/cache/torch
-      # Model storage
       MODEL_STORAGE_DIR: /app/models
-      # Training-specific settings
+      VECTOR_DB_HOST: chromadb
+      VECTOR_DB_PORT: 8000
       TRAINING_QUEUE: training_queue
       MODEL_PREFIX: model_status
       AWS_ACCESS_KEY: test
@@ -99,12 +96,21 @@ services:
       S3_BUCKET: local-bucket
       AWS_REGION: us-east-1
       AWS_ENDPOINT_URL: http://localstack:4566
+      SQLITE_TMPDIR: /app/tmp
+      CHROMA_CLIENT_AUTH_PROVIDER: chromadb.auth.basic.BasicAuthClientProvider
+      CHROMA_CLIENT_AUTH_CREDENTIALS: admin:admin
+      CHROMA_CLIENT_AUTH_TOKEN_HEADER: X-Chroma-Token
+      IS_PERSISTENT: "TRUE"
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      DEFAULT_EMBEDDING_MODEL: "sentence-transformers/all-MiniLM-L6-v2"
     ports:
       - "5000:5000"
-    command: ["python", "training_service.py"]
+    command: ["python3", "training_service.py"]
     volumes:
-      - ./cache:/app/cache:rw  # Add explicit read-write flag
-      - ./models:/app/models:rw  # Add explicit read-write flag
+      - ./cache:/app/cache:rw
+      - ./models:/app/models:rw
+      - ./tmp:/app/tmp:rw
     deploy:
       resources:
         reservations:
@@ -113,13 +119,9 @@ services:
               count: 1
               capabilities: [gpu]
     runtime: nvidia
-    env_file:
-      - .env
     depends_on:
       redis:
         condition: service_healthy
-      ml-base:
-        condition: service_started
     networks:
       - app-network
 
@@ -135,11 +137,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-      start_period: 30s
     networks:
       - app-network
 
-  mongo: 
+  mongo:
     image: mongo:latest
     ports:
       - "27017:27017"
@@ -150,7 +151,6 @@ services:
       - mongodb_data:/data/db
     networks:
       - app-network
-
   localstack:
     image: localstack/localstack:latest
     ports:
@@ -179,23 +179,40 @@ services:
       retries: 3
     networks:
       - app-network
-  frontend:
-    build:
-      context: ./playground 
-      dockerfile: Dockerfile
+
+
+  qdrant:
+    image: qdrant/qdrant:v1.7.4
     ports:
-      - "0.0.0.0:3000:3000"
-    environment:
-      - NEXT_PUBLIC_API_URL=http://api:8080
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
     networks:
       - app-network
+
+  frontend:
+    build:
+      context: ./playground
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://api:8080
     depends_on:
       - api
+    networks:
+      - app-network
+    profiles:
+      - dev
+
 networks:
   app-network:
     driver: bridge
 
-volumes: 
+volumes:
+  qdrant_data:
   mongodb_data:
   redis_data:
-  localstack_data:
+  index_data:
+    driver: local
