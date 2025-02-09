@@ -294,51 +294,86 @@ class SearchService:
             return "Response generation is not available."
 
         try:
-            # Create detailed product context with pricing and features
+            # Create detailed product context with correct metadata access
             product_context = "\n".join(
                 [
-                    f"- Product: {p.get('name', 'Unknown')}\n"
-                    f"  Description: {p.get('description', 'No description')}\n"
-                    f"  Category: {p.get('category', 'Uncategorized')}\n"
-                    f"  Price: {p.get('metadata', {}).get('price', 'Price not available')}\n"
-                    f"  Features: {', '.join(str(v) for k, v in p.get('metadata', {}).items() if k not in ['price'])}"
+                    f"- Product: {p.get('metadata', {}).get('name', 'Unknown')}\n"
+                    f"  Description: {p.get('metadata', {}).get('description', 'No description')}\n"
+                    f"  Category: {p.get('metadata', {}).get('category', 'Uncategorized')}\n"
+                    f"  Price: {p.get('metadata', {}).get('custom_metadata', {}).get('discount_price', 'Price not available')}\n"
+                    f"  Ratings: {p.get('metadata', {}).get('custom_metadata', {}).get('no_of_ratings', 'No ratings')}\n"
+                    f"  Product ID: {p.get('metadata', {}).get('id', 'No ID')}"
                     for p in products
                 ]
             )
 
-            prompt = f"""Based on these available products:
+            prompt = f"""As a product recommendation assistant, analyze these products:
 
             {product_context}
 
-            Help the user with this query: {query}
+            User Query: {query}
 
-            Instructions:
-            1. Focus only on products shown above
-            2. If the query asks for pricing, mention specific prices
-            3. Compare products if multiple options are suitable
-            4. Highlight key features matching the query
-            5. If no products match well, be honest about limitations
-            6. Keep response professional and concise
+            Please provide a helpful response that:
+            1. Recommends the most relevant products
+            2. Mentions specific prices and ratings
+            3. Compares features if multiple products are suitable
+            4. Explains why these products match the query
+            5. Keeps the response concise and clear
 
             Response:"""
 
             # Generate response using pipeline
             response = self.llm(
                 prompt,
-                max_new_tokens=200,
+                max_new_tokens=300,  # Increased for more detailed responses
                 do_sample=True,
                 temperature=0.7,
                 top_p=0.95,
                 repetition_penalty=1.2,
                 num_return_sequences=1,
             )[0]["generated_text"]
-            print(response)
+
             # Extract only the generated part after the prompt
-            return response.split("Response:")[-1].strip()
+            generated_response = response.split("Response:")[-1].strip()
+
+            # If the response is empty or too short, provide a fallback
+            if len(generated_response) < 50:
+                return self._generate_fallback_response(products)
+
+            return generated_response
 
         except Exception as e:
             logger.error(f"Response generation failed: {e}")
             return "Unable to generate response."
+
+    def _generate_fallback_response(self, products: List[Dict]) -> str:
+        """Generate a simple structured response when LLM fails"""
+        try:
+            relevant_products = []
+            for p in products:
+                metadata = p.get("metadata", {})
+                custom_metadata = metadata.get("custom_metadata", {})
+                relevant_products.append(
+                    {
+                        "name": metadata.get("name", "Unknown"),
+                        "price": custom_metadata.get(
+                            "discount_price", "Price not available"
+                        ),
+                        "ratings": custom_metadata.get("no_of_ratings", "No ratings"),
+                    }
+                )
+
+            response = "Here are some relevant products:\n\n"
+            for p in relevant_products:
+                response += f"- {p['name']}\n"
+                response += f"  Price: {p['price']}\n"
+                response += f"  Ratings: {p['ratings']}\n\n"
+
+            return response
+
+        except Exception as e:
+            logger.error(f"Fallback response generation failed: {e}")
+            return "Unable to generate product recommendations."
 
     def _format_search_result(self, result: Dict) -> Dict:
         """Format search result with proper ID handling"""
