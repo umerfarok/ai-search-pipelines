@@ -572,7 +572,7 @@ def search():
                 top_k=data.get("top_k", 10),
                 filters=data.get("filters", {}),
             )
-            results = future.result(timeout=5)  # 5 second timeout
+            results = future.result(timeout=50)  # 5 second timeout
 
         # Generate LLM response
         try:
