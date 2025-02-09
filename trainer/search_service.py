@@ -289,20 +289,21 @@ class SearchService:
         return True
 
     def _generate_response(self, query: str, products: List[Dict]) -> str:
-        """Generate contextual response using LLM with improved prompt"""
+        """Generate contextual response using LLM with corrected data access"""
         if not self.llm:
             return "Response generation is not available."
 
         try:
-            # Create detailed product context with correct metadata access
+            # Create detailed product context with direct access to product fields
+            # The search results now contain fields at the top level rather than nested in metadata
             product_context = "\n".join(
                 [
-                    f"- Product: {p.get('metadata', {}).get('name', 'Unknown')}\n"
-                    f"  Description: {p.get('metadata', {}).get('description', 'No description')}\n"
-                    f"  Category: {p.get('metadata', {}).get('category', 'Uncategorized')}\n"
-                    f"  Price: {p.get('metadata', {}).get('custom_metadata', {}).get('discount_price', 'Price not available')}\n"
-                    f"  Ratings: {p.get('metadata', {}).get('custom_metadata', {}).get('no_of_ratings', 'No ratings')}\n"
-                    f"  Product ID: {p.get('metadata', {}).get('id', 'No ID')}"
+                    f"- Product: {p.get('name', 'Unknown')}\n"
+                    f"  Description: {p.get('description', 'No description')}\n"
+                    f"  Category: {p.get('category', 'Uncategorized')}\n"
+                    f"  Price: {p.get('metadata', {}).get('discount_price', 'Price not available')}\n"
+                    f"  Ratings: {p.get('metadata', {}).get('no_of_ratings', 'No ratings')}\n"
+                    f"  Product ID: {p.get('qdrant_id', 'No ID')}"
                     for p in products
                 ]
             )
@@ -325,7 +326,7 @@ class SearchService:
             # Generate response using pipeline
             response = self.llm(
                 prompt,
-                max_new_tokens=300,  # Increased for more detailed responses
+                max_new_tokens=500,
                 do_sample=True,
                 temperature=0.7,
                 top_p=0.95,
@@ -347,21 +348,15 @@ class SearchService:
             return "Unable to generate response."
 
     def _generate_fallback_response(self, products: List[Dict]) -> str:
-        """Generate a simple structured response when LLM fails"""
+        """Generate a simple structured response when LLM fails, with corrected data access"""
         try:
             relevant_products = []
             for p in products:
-                metadata = p.get("metadata", {})
-                custom_metadata = metadata.get("custom_metadata", {})
-                relevant_products.append(
-                    {
-                        "name": metadata.get("name", "Unknown"),
-                        "price": custom_metadata.get(
-                            "discount_price", "Price not available"
-                        ),
-                        "ratings": custom_metadata.get("no_of_ratings", "No ratings"),
-                    }
-                )
+                relevant_products.append({
+                    "name": p.get('name', 'Unknown'),
+                    "price": p.get('metadata', {}).get('discount_price', 'Price not available'),
+                    "ratings": p.get('metadata', {}).get('no_of_ratings', 'No ratings'),
+                })
 
             response = "Here are some relevant products:\n\n"
             for p in relevant_products:
@@ -376,18 +371,19 @@ class SearchService:
             return "Unable to generate product recommendations."
 
     def _format_search_result(self, result: Dict) -> Dict:
-        """Format search result with proper ID handling"""
+        """Format search result with corrected field mapping"""
         try:
-            print(result)
-            payload = result.get("payload", {})
+            metadata = result.get('metadata', {})
+            custom_metadata = metadata.get('custom_metadata', {})
+            
             return {
-                "mongo_id": payload.get("mongo_id", ""),  # Original MongoDB ID
-                "score": round(float(result.get("score", 0.0)), 4),
-                "name": payload.get("name", ""),
-                "description": payload.get("description", ""),
-                "category": payload.get("category", ""),
-                "metadata": payload.get("custom_metadata", {}),
-                "qdrant_id": result.get("id", ""),  # Qdrant's UUID
+                'mongo_id': metadata.get('mongo_id', ''),
+                'score': round(float(result.get('score', 0.0)), 4),
+                'name': metadata.get('name', ''),
+                'description': metadata.get('description', ''),
+                'category': metadata.get('category', ''),
+                'metadata': custom_metadata,  # Contains discount_price and no_of_ratings
+                'qdrant_id': result.get('id', '')
             }
         except Exception as e:
             logger.error(f"Result formatting error: {str(e)}")
