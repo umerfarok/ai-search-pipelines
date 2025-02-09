@@ -18,27 +18,16 @@ curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
 # Install Node.js (includes npm)
 sudo apt install -y nodejs
 
-# Verify Node.js and npm installation
-echo "Node.js version: $(node -v)"  
-echo "npm version: $(npm -v)"
 
-########################################
-# 2. Install Docker Compose
-########################################
-# Check if docker-compose is already installed
-if command -v docker-compose &>/dev/null; then
-    echo ""
-    echo "Docker Compose is already installed:"
-    docker-compose --version
-else
-    echo ""
-    echo "========================================"
-    echo "Installing Docker Compose..."
-    echo "========================================"
-    sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-    sudo chmod +x /usr/local/bin/docker-compose
-    echo "Docker Compose version: $(docker-compose --version)"
-fi
+
+echo ""
+echo "========================================"
+echo "Installing Docker Compose..."
+echo "========================================"
+sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+sudo chmod +x /usr/local/bin/docker-compose
+echo "Docker Compose version: $(docker-compose --version)"
+
 
 ########################################
 # 3. Install NVIDIA Container Toolkit
