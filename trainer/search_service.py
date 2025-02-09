@@ -165,10 +165,6 @@ class EmbeddingManager:
 
 
 
-from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
-import torch
-
-
 class SearchService:
     def __init__(self):
         self.s3_manager = S3Manager()
