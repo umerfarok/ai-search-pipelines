@@ -113,27 +113,6 @@ func (s *SearchService) Search(c *gin.Context) {
 		return
 	}
 
-	// Set default max items
-	if req.MaxItems == 0 {
-		req.MaxItems = 10
-	}
-	if req.Alpha == 0 {
-		req.Alpha = 0.7
-	}
-	if req.Page == 0 {
-		req.Page = 1
-	}
-
-	// If Query or ModelPath is empty, get the latest completed model
-	if req.Query == "" || req.ModelPath == "" {
-		modelConfig, err := s.getModelConfig("latest")
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to get latest model config: %v", err)})
-			return
-		}
-		req.ModelPath = modelConfig.ModelPath
-	}
-
 	// Forward request to search service
 	jsonBody, err := json.Marshal(req)
 	if err != nil {
@@ -153,44 +132,44 @@ func (s *SearchService) Search(c *gin.Context) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		var errorResp struct {
-			Error string `json:"error"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&errorResp); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "unknown search service error"})
-			return
-		}
-		c.JSON(resp.StatusCode, gin.H{"error": errorResp.Error})
-		return
-	}
-
-	// Read the response body
-	responseBody, err := io.ReadAll(resp.Body)
+	// Read the full response body
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read response: %v", err)})
 		return
 	}
 
-	// Try to decode as JSON first
+	// Log the raw response for debugging
+	log.Printf("Search service response: %s", string(body))
+
+	if resp.StatusCode != http.StatusOK {
+		var errorResp struct {
+			Error   string `json:"error"`
+			Message string `json:"message,omitempty"`
+		}
+		if err := json.Unmarshal(body, &errorResp); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":        fmt.Sprintf("search service error (status %d)", resp.StatusCode),
+				"raw_response": string(body),
+			})
+			return
+		}
+		c.JSON(resp.StatusCode, errorResp)
+		return
+	}
+
+	// Try to decode as JSON
 	var searchResp SearchResponse
-	if err := json.Unmarshal(responseBody, &searchResp); err != nil {
-		// If JSON decoding fails, treat it as a text response
-		searchResp = SearchResponse{
-			TextResponse: string(responseBody),
-			QueryInfo: QueryInfo{
+	if err := json.Unmarshal(body, &searchResp); err != nil {
+		// If JSON decoding fails, return as text response
+		c.JSON(http.StatusOK, gin.H{
+			"text_response": string(body),
+			"query_info": QueryInfo{
 				Original:  req.Query,
 				ModelPath: req.ModelPath,
 			},
-			Page:     req.Page,
-			MaxItems: req.MaxItems,
-		}
-	}
-
-	// Apply filters if any and if we have structured results
-	if len(req.Filters) > 0 && len(searchResp.Results) > 0 {
-		searchResp.Results = s.applyFilters(searchResp.Results, req.Filters)
-		searchResp.Total = len(searchResp.Results)
+		})
+		return
 	}
 
 	c.JSON(http.StatusOK, searchResp)

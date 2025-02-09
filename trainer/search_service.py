@@ -574,20 +574,54 @@ def search():
             )
             results = future.result(timeout=5)  # 5 second timeout
 
-    
-        llm_response = search_service._generate_response(data["query"], results)
-        print("llmresponse", llm_response)
-        response = search_service._format_frontend_response(results, llm_response)
-        print(response)
+        # Generate LLM response
+        try:
+            llm_response = search_service._generate_response(data["query"], results)
+            logger.info(f"Generated LLM response: {llm_response[:100]}...")  # Log first 100 chars
+        except Exception as e:
+            logger.error(f"LLM response generation failed: {str(e)}")
+            llm_response = "Unable to generate AI response."
 
-        return jsonify(response)
+        # Format response
+        try:
+            formatted_response = {
+                "generated_response": llm_response,
+                "results": [
+                    {
+                        "id": res.get("mongo_id", ""),
+                        "name": res.get("name", ""),
+                        "description": res.get("description", ""),
+                        "category": res.get("category", ""),
+                        "score": res.get("score", 0),
+                        "metadata": {
+                            "price": res.get("metadata", {}).get("discount_price", "N/A"),
+                            "ratings": res.get("metadata", {}).get("no_of_ratings", "0"),
+                        }
+                    }
+                    for res in results
+                ],
+                "total": len(results),
+                "query_info": {
+                    "original": data["query"],
+                    "model_path": data["model_path"]
+                }
+            }
+            logger.info(f"Formatted {len(results)} results successfully")
+            return jsonify(formatted_response)
+
+        except Exception as e:
+            logger.error(f"Response formatting failed: {str(e)}")
+            return jsonify({
+                "error": "Failed to format response",
+                "message": str(e)
+            }), 500
 
     except TimeoutError:
         logger.warning("Search request timed out")
         return jsonify({"error": "Request timeout"}), 504
     except Exception as e:
-        logger.error(f"Endpoint error: {str(e)}")
-        return jsonify({"error": "Internal server error"}), 500
+        logger.error(f"Search endpoint error: {str(e)}", exc_info=True)  # Added exc_info for stack trace
+        return jsonify({"error": "Internal server error", "message": str(e)}), 500
 
 
 @app.route("/health")
