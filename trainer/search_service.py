@@ -16,7 +16,8 @@ from botocore.config import Config
 import pandas as pd
 import io
 from collections import OrderedDict
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
+import torch
 import json
 from config import AppConfig
 from vector_store import VectorStore
@@ -171,18 +172,39 @@ class SearchService:
         self._initialize_llm()
         self.vector_store = VectorStore()
 
+    # Update these imports at the top of your file
+
+
+from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
+import torch
+
+
+class SearchService:
+    def __init__(self):
+        self.s3_manager = S3Manager()
+        self.model_cache = ModelCache(AppConfig.MODEL_CACHE_SIZE)
+        self.embedding_manager = EmbeddingManager()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self._initialize_llm()
+        self.vector_store = VectorStore()
+
     def _initialize_llm(self):
         try:
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                "TheBloke/Mistral-7B-Instruct-v0.1-GPTQ", trust_remote_code=True
+            # Using a smaller, more efficient model
+            model_name = "facebook/opt-350m"  # You can also try "facebook/opt-125m" for even smaller footprint
+
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            self.llm = pipeline(
+                "text-generation",
+                model=model_name,
+                tokenizer=self.tokenizer,
+                device=self.device,
+                torch_dtype=(
+                    torch.float16 if torch.cuda.is_available() else torch.float32
+                ),
+                max_length=512,
             )
-            self.llm = AutoModelForCausalLM.from_pretrained(
-                "TheBloke/Mistral-7B-Instruct-v0.1-GPTQ",
-                device_map="auto",
-                trust_remote_code=True,
-                revision="main",
-            )
-            logger.info("LLM initialized successfully")
+            logger.info("LLM initialized successfully using pipeline")
         except Exception as e:
             logger.error(f"LLM initialization failed: {e}")
             self.llm = None
@@ -268,7 +290,7 @@ class SearchService:
 
     def _generate_response(self, query: str, products: List[Dict]) -> str:
         """Generate contextual response using LLM with improved prompt"""
-        if not self.llm or not self.tokenizer:
+        if not self.llm:
             return "Response generation is not available."
 
         try:
@@ -284,7 +306,7 @@ class SearchService:
                 ]
             )
 
-            prompt = f"""<s>[INST] You are a helpful product search assistant. Based on these available products:
+            prompt = f"""Based on these available products:
 
             {product_context}
 
@@ -296,30 +318,23 @@ class SearchService:
             3. Compare products if multiple options are suitable
             4. Highlight key features matching the query
             5. If no products match well, be honest about limitations
-            6. If query is unclear, ask for clarification
-            7. Keep response professional and concise
+            6. Keep response professional and concise
 
-            Respond in this format:
-            - Main recommendation(s)
-            - Key features/pricing
-            - Brief explanation why
-            [/INST]"""
+            Response:"""
 
-            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
-            attention_mask = inputs["attention_mask"]
-            outputs = self.llm.generate(
-                inputs.input_ids,
-                max_new_tokens=400,
-                attention_mask=attention_mask,  # Increased for more detailed responses
-                temperature=0.7,  # Slightly increased for more natural responses
+            # Generate response using pipeline
+            response = self.llm(
+                prompt,
+                max_new_tokens=200,
                 do_sample=True,
-                top_p=0.95,  # Added for better quality
-                repetition_penalty=1.2,  # Prevent repetitive text
-                pad_token_id=self.tokenizer.eos_token_id,
-            )
-
-            response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-            return response.split("[/INST]")[-1].strip()
+                temperature=0.7,
+                top_p=0.95,
+                repetition_penalty=1.2,
+                num_return_sequences=1,
+            )[0]["generated_text"]
+            print(response)
+            # Extract only the generated part after the prompt
+            return response.split("Response:")[-1].strip()
 
         except Exception as e:
             logger.error(f"Response generation failed: {e}")
