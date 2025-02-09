@@ -163,18 +163,6 @@ class EmbeddingManager:
                 torch.cuda.empty_cache()
 
 
-class SearchService:
-    """RAG-based search service with efficient model management"""
-
-    def __init__(self):
-        self.s3_manager = S3Manager()
-        self.model_cache = ModelCache(AppConfig.MODEL_CACHE_SIZE)
-        self.embedding_manager = EmbeddingManager()
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self._initialize_llm()
-        self.vector_store = VectorStore()
-
-    # Update these imports at the top of your file
 
 
 from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
@@ -190,7 +178,7 @@ class SearchService:
         self._initialize_llm()
         self.vector_store = VectorStore()
         self._initialize_query_expansion()
-
+        self.cache = {}
     def _initialize_query_expansion(self):
         """Initialize lightweight model for query expansion"""
         try:
