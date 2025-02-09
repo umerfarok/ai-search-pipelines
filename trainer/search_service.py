@@ -468,6 +468,7 @@ class SearchService:
             results = self._semantic_search(expanded_query, model_path, top_k)
 
             # Apply post-filters
+            print(results)
             if filters:
                 results = self._apply_filters(results, filters)
 
