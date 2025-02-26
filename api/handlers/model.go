@@ -175,26 +175,59 @@ func (s *ConfigService) CreateConfig(c *gin.Context) {
 }
 
 func (s *ConfigService) GetConfig(c *gin.Context) {
-	id, err := primitive.ObjectIDFromHex(c.Param("id"))
+	id := c.Param("id")
+	log.Printf("Get config request for ID: %s", id)
+
+	var objID primitive.ObjectID
+	var err error
+
+	// Try to parse as ObjectID first
+	objID, err = primitive.ObjectIDFromHex(id)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id format"})
+		// If not an ObjectID, try as string ID
+		log.Printf("ID %s is not a valid ObjectID, trying as string ID", id)
+
+		// Try to find by string ID field if it exists
+		var config cfg.ModelConfig
+		err = s.db.Collection("configs").FindOne(
+			context.Background(),
+			bson.M{"id": id}, // Try with string ID field
+		).Decode(&config)
+
+		if err != nil {
+			if err == mongo.ErrNoDocuments {
+				log.Printf("Config with ID %s not found", id)
+				c.JSON(http.StatusNotFound, gin.H{"error": "configuration not found"})
+				return
+			}
+			log.Printf("Database error: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, config)
 		return
 	}
 
+	// If we got here, it's a valid ObjectID
 	var config cfg.ModelConfig
 	err = s.db.Collection("configs").FindOne(
 		context.Background(),
-		bson.M{"_id": id},
+		bson.M{"_id": objID},
 	).Decode(&config)
+
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
+			log.Printf("Config with ObjectID %s not found", id)
 			c.JSON(http.StatusNotFound, gin.H{"error": "configuration not found"})
 			return
 		}
+		log.Printf("Database error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
+	log.Printf("Successfully found config for ID %s", id)
 	c.JSON(http.StatusOK, config)
 }
 

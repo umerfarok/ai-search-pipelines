@@ -371,35 +371,52 @@ class VectorStore:
             logger.error(f"Error deleting collection: {e}")
             return False
     
-    def get_collection_info(self) -> Dict[str, Any]:
-        """Get information about the collection."""
+    def get_collection_info(self, collection_name: str = None) -> Dict[str, Any]:
+        """Get information about a collection including vector count"""
         try:
+            # Use provided collection name or fall back to instance collection
+            coll_name = collection_name or self.collection_name
+            if not coll_name:
+                return {"error": "No collection name provided"}
+                
             info = {
-                "name": self.collection_name,
+                "name": coll_name,
                 "vector_size": self.vector_size,
-                "count": 0
+                "count": 0,
+                "exists": False
             }
             
             # Handle Qdrant
             if hasattr(AppConfig, 'QDRANT_HOST') and AppConfig.QDRANT_HOST:
                 client = self._get_qdrant_client()
-                collection_info = client.get_collection(collection_name=self.collection_name)
-                info["count"] = collection_info.vectors_count
-                info["config"] = {
-                    "distance": collection_info.config.params.vectors.distance,
-                    "size": collection_info.config.params.vectors.size
-                }
+                if not client:
+                    return {"error": "No Qdrant client available"}
+                    
+                try:
+                    collection_info = client.get_collection(collection_name=coll_name)
+                    info["count"] = collection_info.vectors_count if hasattr(collection_info, "vectors_count") else 0
+                    info["exists"] = True
+                    info["config"] = {
+                        "distance": collection_info.config.params.vectors.distance
+                        if hasattr(collection_info, "config") and hasattr(collection_info.config, "params") else None,
+                        "size": collection_info.config.params.vectors.size
+                        if hasattr(collection_info, "config") and hasattr(collection_info.config, "params") else None
+                    }
+                except Exception as e:
+                    logger.error(f"Error getting collection info: {e}")
+                    info["error"] = str(e)
             
             # Handle ChromaDB
             elif hasattr(AppConfig, 'VECTOR_DB_HOST') and AppConfig.VECTOR_DB_HOST:
                 client = self._get_chroma_client()
-                collection = client.get_collection(self.collection_name)
+                collection = client.get_collection(coll_name)
                 info["count"] = collection.count()
+                info["exists"] = True
             
             return info
         except Exception as e:
-            logger.error(f"Error getting collection info: {e}")
-            return {"name": self.collection_name, "error": str(e)}
+            logger.error(f"Failed to get collection info: {e}")
+            return {"name": collection_name or self.collection_name, "error": str(e)}
 
     def collection_exists(self, collection_name: str) -> bool:
         """Check if a collection exists with improved error handling."""

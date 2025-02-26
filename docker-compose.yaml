@@ -52,6 +52,8 @@ services:
       CHROMA_CLIENT_AUTH_CREDENTIALS: admin:admin
       CHROMA_CLIENT_AUTH_TOKEN_HEADER: X-Chroma-Token
       IS_PERSISTENT: "TRUE"
+    ports:
+      - "5001:5001"
     command: ["python3", "search_service.py"]
     volumes:
       - ./cache:/app/cache:rw

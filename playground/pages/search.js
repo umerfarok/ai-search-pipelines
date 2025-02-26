@@ -293,45 +293,14 @@ const SearchError = ({ error, onRetry }) => (
     </div>
 );
 
-const SearchResults = ({ results, naturalResponse, queryInfo, currentPage, totalPages, onPageChange, error }) => {
+const SearchResults = ({ results, naturalResponse, queryInfo, currentPage, totalPages, onPageChange, error, suggestion }) => {
     if (error) {
         return <SearchError error={error} />;
     }
 
-    // Check if we have a text response and no structured results
-    if (typeof naturalResponse === 'string' && naturalResponse) {
-        return (
-            <div className="space-y-6">
-                {/* Natural Language Response Card */}
-                <div className="bg-white dark:bg-gray-800 border dark:border-gray-700 rounded-lg p-6 shadow-sm">
-                    <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-4">
-                        AI Recommendations
-                    </h3>
-                    <div className="prose dark:prose-invert max-w-none">
-                        {naturalResponse.split('\n').map((line, i) => (
-                            <p key={i} className="text-gray-700 dark:text-gray-300 mb-2">
-                                {line}
-                            </p>
-                        ))}
-                    </div>
-                </div>
-
-                {/* Query Info */}
-                {queryInfo && (
-                    <div className="text-sm text-gray-500 dark:text-gray-400">
-                        <span>Original Query: {queryInfo.original}</span>
-                        {queryInfo.model_path && (
-                            <>
-                                <span className="mx-2">•</span>
-                                <span>Model: {queryInfo.model_path}</span>
-                            </>
-                        )}
-                    </div>
-                )}
-            </div>
-        );
-    }
-
+    // Display suggestion when there are no results
+    const showEmptyState = results.length === 0;
+    
     return (
         <div className="space-y-6">
             {/* Natural Language Response */}
@@ -343,17 +312,39 @@ const SearchResults = ({ results, naturalResponse, queryInfo, currentPage, total
                 </div>
             )}
 
+            {/* Suggestion when no results */}
+            {showEmptyState && suggestion && (
+                <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-100 dark:border-amber-800 
+                         rounded-lg p-4 mb-4">
+                    <h3 className="flex items-center gap-2 text-sm font-semibold text-amber-800 dark:text-amber-300 mb-2">
+                        <AlertCircle className="h-4 w-4" />
+                        No results found
+                    </h3>
+                    <p className="text-gray-700 dark:text-gray-300 mb-2">
+                        No products match your search criteria.
+                    </p>
+                    <div className="mt-3">
+                        <span className="text-sm font-medium text-amber-800 dark:text-amber-300">Suggestion: </span>
+                        <span className="text-gray-700 dark:text-gray-300">{suggestion}</span>
+                    </div>
+                </div>
+            )}
+
             {/* Query Info */}
             {queryInfo && (
                 <div className="text-sm text-gray-500 dark:text-gray-400 mb-4">
                     <span>Original Query: {queryInfo.original}</span>
-                    <span className="mx-2">•</span>
-                    <span>Model: {queryInfo.model_path}</span>
+                    {queryInfo.model_path && (
+                        <>
+                            <span className="mx-2">•</span>
+                            <span>Model: {queryInfo.model_path}</span>
+                        </>
+                    )}
                 </div>
             )}
 
             {/* Results */}
-            {results.map((result, index) => (
+            {!showEmptyState && results.map((result, index) => (
                 <div key={index} className="border dark:border-gray-700 rounded-lg p-4 
                                     hover:shadow-md transition-shadow bg-white dark:bg-gray-800">
                     <div className="flex justify-between items-start">
@@ -389,7 +380,7 @@ const SearchResults = ({ results, naturalResponse, queryInfo, currentPage, total
             ))}
 
             {/* Pagination */}
-            {totalPages > 1 && (
+            {!showEmptyState && totalPages > 1 && (
                 <div className="flex justify-center items-center gap-4 mt-6">
                     <button
                         onClick={() => onPageChange(currentPage - 1)}
@@ -443,7 +434,8 @@ export default function ModelSearchComponent() {
         results: [],
         naturalResponse: '',
         queryInfo: null,
-        total: 0
+        total: 0,
+        suggestion: ''
     });
 
     const [searchError, setSearchError] = useState(null);
@@ -471,43 +463,21 @@ export default function ModelSearchComponent() {
                 throw new Error(errorData.error || 'Search failed');
             }
 
-            // Handle both text and JSON responses
-            const contentType = response.headers.get('content-type');
-            let data;
-
-            if (contentType && contentType.includes('application/json')) {
-                data = await response.json();
-                
-                // Check if it's a text response wrapped in JSON
-                if (typeof data === 'string') {
-                    data = {
-                        text_response: data,
-                        query_info: {
-                            original: searchQuery,
-                            model_path: selectedModel.model_path
-                        }
-                    };
-                }
-            } else {
-                // Handle plain text response
-                const textData = await response.text();
-                data = {
-                    text_response: textData,
-                    query_info: {
-                        original: searchQuery,
-                        model_path: selectedModel.model_path
-                    }
-                };
-            }
-
+            // Parse response
+            const data = await response.json();
+            
+            // Extract suggestions if available
+            const suggestion = data.search_metadata?.suggestion || '';
+            
             setSearchResponse({
                 results: data.results || [],
-                naturalResponse: data.text_response || '',
-                queryInfo: data.query_info || {
+                naturalResponse: data.generated_response || '',
+                queryInfo: {
                     original: searchQuery,
                     model_path: selectedModel.model_path
                 },
-                total: data.total || 0
+                total: data.total || 0,
+                suggestion: suggestion
             });
 
             setCurrentPage(1);
@@ -519,7 +489,8 @@ export default function ModelSearchComponent() {
                 results: [],
                 naturalResponse: '',
                 queryInfo: null,
-                total: 0
+                total: 0,
+                suggestion: ''
             });
         } finally {
             setSearching(false);
@@ -603,6 +574,7 @@ export default function ModelSearchComponent() {
                                     currentPage={currentPage}
                                     totalPages={totalPages}
                                     onPageChange={handlePageChange}
+                                    suggestion={searchResponse.suggestion}
                                 />
                             ) : (
                                 <div className="text-center text-gray-500 p-8">
