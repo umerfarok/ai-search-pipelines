@@ -1,7 +1,7 @@
 package config
 
 import (
-	"go.mongodb.org/mongo-driver/bson/primitive"
+	"time"
 )
 
 type ModelStatus string
@@ -15,76 +15,66 @@ const (
 	ModelStatusCanceled   ModelStatus = "canceled"
 )
 
+// ModelConfig represents search model configuration settings
 type ModelConfig struct {
-	ID              primitive.ObjectID `json:"_id" bson:"_id"`
-	Name            string             `json:"name" bson:"name"`
-	Description     string             `json:"description" bson:"description"`
-	ModelPath       string             `json:"model_path" bson:"model_path"`
-	DataSource      DataSource         `json:"data_source" bson:"data_source"`
-	SchemaMapping   SchemaMapping      `json:"schema_mapping" bson:"schema_mapping"`
-	TrainingConfig  TrainingConfig     `json:"training_config" bson:"training_config"`
-	Status          string             `json:"status" bson:"status"`
-	Error           string             `json:"error,omitempty" bson:"error,omitempty"`
-	Mode            string             `json:"mode" bson:"mode"` // "replace" or "append"
-	PreviousVersion string             `json:"previous_version,omitempty" bson:"previous_version,omitempty"`
-	Version         string             `json:"version" bson:"version"` // Timestamp-based version identifier
-	CreatedAt       string             `json:"created_at" bson:"created_at"`
-	UpdatedAt       string             `json:"updated_at" bson:"updated_at"`
-	TrainingStats   *TrainingStats     `json:"training_stats,omitempty" bson:"training_stats,omitempty"`
+	ID                string           `json:"id" bson:"_id,omitempty"`
+	Name              string           `json:"name" bson:"name"`
+	Description       string           `json:"description" bson:"description"`
+	EmbeddingModel    string           `json:"embedding_model" bson:"embedding_model"`
+	VectorSize        int              `json:"vector_size" bson:"vector_size"`
+	CreatedAt         time.Time        `json:"created_at" bson:"created_at"`
+	UpdatedAt         time.Time        `json:"updated_at" bson:"updated_at"`
+	Status            string           `json:"status" bson:"status"`
+	TrainingCompleted bool             `json:"training_completed" bson:"training_completed"`
+	DataSourceConfig  DataSourceConfig `json:"data_source" bson:"data_source"`
+	IndexConfig       IndexConfig      `json:"index_config" bson:"index_config"`
+	SchemaMapping     SchemaMapping    `json:"schema_mapping" bson:"schema_mapping"`
+	ModelPath         string           `json:"model_path" bson:"model_path"` // Add this field
 }
 
-type DataSource struct {
-	Type         string   `json:"type"`
-	Location     string   `json:"location"`
-	FileType     string   `json:"file_type"` // e.g., "csv", "json"
-	Columns      []Column `json:"columns"`
-	TotalRecords int      `json:"total_records,omitempty"`
+// DataSourceConfig defines the data source for training
+type DataSourceConfig struct {
+	Type        string                 `json:"type" bson:"type"` // s3, postgres, csv, etc.
+	Location    string                 `json:"location" bson:"location"`
+	Credentials string                 `json:"credentials,omitempty" bson:"credentials,omitempty"`
+	Format      string                 `json:"format" bson:"format"`
+	Options     map[string]interface{} `json:"options" bson:"options"`
+}
+
+// IndexConfig defines vector index configuration
+type IndexConfig struct {
+	Type               string `json:"type" bson:"type"`                       // hnsw, flat, etc.
+	DistanceMetric     string `json:"distance_metric" bson:"distance_metric"` // cosine, dot, euclidean
+	HnswM              int    `json:"hnsw_m,omitempty" bson:"hnsw_m,omitempty"`
+	HnswEfConstruction int    `json:"hnsw_ef_construction,omitempty" bson:"hnsw_ef_construction,omitempty"`
+	HnswEfSearch       int    `json:"hnsw_ef_search,omitempty" bson:"hnsw_ef_search,omitempty"`
+}
+
+// SchemaMapping maps data fields to vector search fields
+type SchemaMapping struct {
+	IDColumn          string   `json:"idcolumn" bson:"idcolumn"`
+	NameColumn        string   `json:"namecolumn" bson:"namecolumn"`
+	DescriptionColumn string   `json:"descriptioncolumn" bson:"descriptioncolumn"`
+	CategoryColumn    string   `json:"categorycolumn" bson:"categorycolumn"`
+	CustomColumns     []Column `json:"customcolumns" bson:"customcolumns"`
+	RequiredColumns   []string `json:"required_columns" bson:"required_columns"`
 }
 
 type Column struct {
-	Name     string `json:"name"`
-	Type     string `json:"type"`
-	Role     string `json:"role"`
-	Required bool   `json:"required"`
-}
-
-type TrainingConfig struct {
-	ModelType       string            `json:"model_type"`
-	EmbeddingModel  string            `json:"embeddingmodel"`
-	BatchSize       int               `json:"batch_size"`
-	MaxTokens       int               `json:"max_tokens"`
-	LLMModel        string            `json:"llm_model"` // Add this field for LLM model selection
-	TrainingParams  map[string]string `json:"training_params,omitempty"`
-	ValidationSplit float64           `json:"validation_split"`
-}
-
-type SchemaMapping struct {
-	Idcolumn          string         `json:"idcolumn" bson:"idcolumn"`
-	Namecolumn        string         `json:"namecolumn" bson:"namecolumn"`
-	Descriptioncolumn string         `json:"descriptioncolumn" bson:"descriptioncolumn"`
-	Categorycolumn    string         `json:"categorycolumn" bson:"categorycolumn"`
-	Customcolumns     []CustomColumn `json:"customcolumns" bson:"customcolumns"` // Update to use CustomColumn struct
-}
-
-type CustomColumn struct {
 	Name     string `json:"name" bson:"name"`
-	Type     string `json:"type" bson:"type"` // text, number, category, url
-	Role     string `json:"role" bson:"role"` // training, metadata
+	Type     string `json:"type" bson:"type"`
+	Role     string `json:"role" bson:"role"`
 	Required bool   `json:"required" bson:"required"`
 }
 
-type TrainingStats struct {
-	StartTime        string  `json:"start_time"`
-	EndTime          string  `json:"end_time,omitempty"`
-	ProcessedRecords int     `json:"processed_records"`
-	TotalRecords     int     `json:"total_records"`
-	TrainingAccuracy float64 `json:"training_accuracy,omitempty"`
-	ValidationScore  float64 `json:"validation_score,omitempty"`
-	ErrorRate        float64 `json:"error_rate,omitempty"`
-	Progress         float64 `json:"progress"`
-	LLMModel         string  `json:"llm_model,omitempty"`      // Add this field
-	LLMModelName     string  `json:"llm_model_name,omitempty"` // Add this field
-	CompletedAt      string  `json:"completed_at,omitempty"`   // Add this field
+// ConfigQueue represents a training request in the queue
+type ConfigQueue struct {
+	ID          string     `json:"id" bson:"_id,omitempty"`
+	ConfigID    string     `json:"config_id" bson:"config_id"`
+	Status      string     `json:"status" bson:"status"` // pending, processing, completed, failed
+	QueuedAt    time.Time  `json:"queued_at" bson:"queued_at"`
+	ProcessedAt *time.Time `json:"processed_at,omitempty" bson:"processed_at,omitempty"`
+	Error       string     `json:"error,omitempty" bson:"error,omitempty"`
 }
 
 type SearchRequest struct {
@@ -109,30 +99,47 @@ type SearchResponse struct {
 	ConfigInfo   ModelConfig    `json:"config_info,omitempty"`
 	TextResponse string         `json:"text_response,omitempty"`
 }
-
 type QueuedJob struct {
 	ConfigID  string      `json:"config_id"`
 	Config    ModelConfig `json:"config"`
 	Timestamp string      `json:"timestamp"`
 }
 
-// Optional: Add a type for available LLM models (can be used for validation)
-type LLMModelInfo struct {
+type LLMModel struct {
 	Name        string `json:"name"`
+	Path        string `json:"path"`
 	Description string `json:"description"`
+	Dimension   int    `json:"dimension"`
+	IsDefault   bool   `json:"is_default"`
 }
 
-var AvailableLLMModels = map[string]LLMModelInfo{
-	"deepseek-coder": {
-		Name:        "DeepSeek Coder 1.3B",
-		Description: "Code-optimized model for technical content",
+var AvailableLLMModels = map[string]LLMModel{
+	"all-minilm-l6": {
+		Name:        "All-MiniLM-L6",
+		Path:        "sentence-transformers/all-MiniLM-L6-v2",
+		Description: "Fast and efficient general-purpose embedding model",
+		Dimension:   384,
+		IsDefault:   true,
 	},
-	"gpt2": {
-		Name:        "GPT-2",
-		Description: "General purpose language model",
+	"bge-small": {
+		Name:        "BGE Small",
+		Path:        "BAAI/bge-small-en-v1.5",
+		Description: "Small but effective embedding model",
+		Dimension:   384,
+		IsDefault:   false,
 	},
-	"opt-350m": {
-		Name:        "OPT 350M",
-		Description: "Compact language model for general text",
+	"bge-base": {
+		Name:        "BGE Base",
+		Path:        "BAAI/bge-base-en-v1.5",
+		Description: "Medium-sized embedding model",
+		Dimension:   768,
+		IsDefault:   false,
+	},
+	"bge-large": {
+		Name:        "BGE Large",
+		Path:        "BAAI/bge-large-en-v1.5",
+		Description: "Large, high-performance embedding model",
+		Dimension:   1024,
+		IsDefault:   false,
 	},
 }

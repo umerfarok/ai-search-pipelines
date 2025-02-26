@@ -1,10 +1,111 @@
-from dataclasses import dataclass
 import os
-from dotenv import load_dotenv
+import json
+import logging
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any
+from enum import Enum
+from datetime import datetime
+import boto3
+from botocore.exceptions import ClientError
 
-load_dotenv()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class DataSourceType(str, Enum):
+    S3 = "s3"
+    POSTGRES = "postgres"
+    CSV = "csv"
+    JSON = "json"
+    MONGODB = "mongodb"
+
+class IndexType(str, Enum):
+    HNSW = "hnsw"
+    FLAT = "flat"
+    IVF = "ivf"
+
+class DistanceMetric(str, Enum):
+    COSINE = "cosine" 
+    DOT = "dot"
+    EUCLIDEAN = "euclidean"
+
+class ConfigStatus(str, Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 @dataclass
+class DataSourceConfig:
+    type: str
+    location: str
+    format: str
+    credentials: Optional[str] = None
+    options: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class IndexConfig:
+    type: str = "hnsw"
+    distance_metric: DistanceMetric = DistanceMetric.COSINE
+    hnsw_m: int = 16
+    hnsw_ef_construction: int = 200
+    hnsw_ef: int = 100
+
+@dataclass
+class SchemaMapping:
+    idcolumn: str
+    namecolumn: str
+    descriptioncolumn: str
+    categorycolumn: str
+    customcolumns: List[Dict[str, Any]] = field(default_factory=list)
+    required_columns: List[str] = field(default_factory=list)
+
+@dataclass
+class ModelConfig:
+    id: str
+    name: str
+    description: str
+    mode: str = "replace"
+    previous_version: str = ""
+    data_source: Dict[str, Any] = field(default_factory=dict)
+    schema_mapping: SchemaMapping = field(default_factory=SchemaMapping)
+    training_config: Dict[str, Any] = field(default_factory=dict)
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'ModelConfig':
+        """Create a ModelConfig from a dictionary"""
+        # Convert nested objects
+        data_source = DataSourceConfig(**data.get('data_source', {}))
+        index_config = IndexConfig(**data.get('index_config', {}))
+        schema_mapping = SchemaMapping(**data.get('schema_mapping', {}))
+        
+        # Parse dates
+        created_at = datetime.fromisoformat(data['created_at']) if isinstance(data['created_at'], str) else data['created_at']
+        updated_at = datetime.fromisoformat(data['updated_at']) if isinstance(data['updated_at'], str) else data['updated_at']
+        
+        return cls(
+            id=data['id'],
+            name=data['name'],
+            description=data['description'],
+            embedding_model=data['embedding_model'],
+            vector_size=data['vector_size'],
+            created_at=created_at,
+            updated_at=updated_at,
+            status=data['status'],
+            training_completed=data['training_completed'],
+            data_source=data_source,
+            index_config=index_config,
+            schema_mapping=schema_mapping
+        )
+
+@dataclass
+class ConfigQueue:
+    id: str
+    config_id: str
+    status: str
+    queued_at: datetime
+    processed_at: Optional[datetime] = None
+    error: Optional[str] = None
+
 class AppConfig:
     # Redis Configuration
     MIN_SCORE_THRESHOLD = 0.4
@@ -32,6 +133,7 @@ class AppConfig:
     # Retry Configuration
     MAX_RETRIES: int = 3
     RETRY_DELAY: int = 1
+    TRANSFORMER_CACHE = os.getenv("TRANSFORMER_CACHE", "/app/shared/cache/transformers")
 
     # Model Configuration
     DEFAULT_MODEL = "sentence-transformers/all-minilm-l6-v2"  # Update default model
@@ -73,7 +175,7 @@ class AppConfig:
     @classmethod
     def get_model_path(cls, model_key: str) -> str:
         """Get the full model path from a model key"""
-        if model_key in cls.MODEL_MAPPINGS:
+        if (model_key in cls.MODEL_MAPPINGS):
             return cls.MODEL_MAPPINGS[model_key]["path"]
         return model_key  # Return as-is if not found
 
@@ -81,7 +183,7 @@ class AppConfig:
     def get_model_key(cls, model_path: str) -> str:
         """Get the model key from a full path"""
         for key, info in cls.MODEL_MAPPINGS.items():
-            if info["path"] == model_path:
+            if (info["path"] == model_path):
                 return key
         return model_path
 
@@ -191,6 +293,8 @@ class AppConfig:
             "adventure",
         ]
     }
+    QUERY_EXPANSION_ENABLED: bool = bool(os.getenv("QUERY_EXPANSION_ENABLED", "True"))
+    SIMPLE_QUERY_EXPANSION: bool = bool(os.getenv("SIMPLE_QUERY_EXPANSION", "False"))
 
     @classmethod
     def setup_cache_dirs(cls):
@@ -233,3 +337,23 @@ class AppConfig:
     # Training Configuration
     BATCH_SIZE = int(os.getenv("BATCH_SIZE", "128"))
     MAX_TOKENS = int(os.getenv("MAX_TOKENS", "512"))
+
+    # Service configuration
+    SERVICE_PORT = int(os.getenv("SERVICE_PORT", "5001"))
+    DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
+    
+    # Model and cache paths
+    MODEL_CACHE_DIR = os.getenv("MODEL_CACHE_DIR", "/tmp/model_cache")
+    TRANSFORMER_CACHE = os.getenv("TRANSFORMER_CACHE", "/tmp/transformers")
+    
+    # AWS configuration
+    AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+    SQS_QUEUE_URL = os.getenv("SQS_QUEUE_URL", "")
+    CONFIG_BUCKET = os.getenv("CONFIG_BUCKET", "")
+    
+    # Vector DB configuration
+    QDRANT_HOST = os.getenv("QDRANT_HOST", "qdrant")  # Changed from 'localhost' to 'qdrant'
+    QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
+    QDRANT_GRPC_PORT = int(os.getenv("QDRANT_GRPC_PORT", "6334"))
+    QDRANT_PREFER_GRPC = True
+    QDRANT_TIMEOUT = 30  # seconds

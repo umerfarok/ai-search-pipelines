@@ -103,10 +103,11 @@ services:
       IS_PERSISTENT: "TRUE"
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      DEFAULT_EMBEDDING_MODEL: "sentence-transformers/all-MiniLM-L6-v2"
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
     ports:
       - "5000:5000"
-    command: ["python3", "training_service.py"]
+    command: ["python3", "training_service.py"] 
     volumes:
       - ./cache:/app/cache:rw
       - ./models:/app/models:rw
@@ -124,7 +125,7 @@ services:
         condition: service_healthy
     networks:
       - app-network
-
+ 
   redis:
     image: redis:7-alpine
     ports:

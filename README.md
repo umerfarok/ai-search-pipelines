@@ -1,5 +1,5 @@
-# AI-Powered Product Search Engine
-## Next-Generation Product Discovery Platform
+# AI-Powered Product Search Engine with RAG
+## Enterprise Product Discovery Platform
 
 ---
 
@@ -50,154 +50,218 @@
 
 ---
 
-# Key Features: Query Understanding 🔍
+# System Architecture
 
-## Advanced Processing
-- Natural language query interpretation
-- Dynamic intent classification
-- Entity recognition
-- Context extraction
+## Core Components
 
-## Intelligent Enhancement
-- Domain-specific vocabulary
-- Automatic query expansion
-- Spelling correction
-- Semantic feature extraction
+### 1. API Service (Go)
+- Configuration management via REST API
+- MongoDB for config persistence
+- Redis for job queue management
+- S3 integration for CSV storage
+- Real-time status updates
+- Versioning support
+
+### 2. Training Service (Python)
+- Processes jobs from Redis queue
+- Reads product data from S3
+- Generates embeddings using Sentence Transformers
+- Stores vectors in Qdrant
+- Supports incremental updates
+- Version-aware training
+
+### 3. Search Service (Python)
+- RAG (Retrieval Augmented Generation) implementation
+- Hybrid vector search with Qdrant
+- LLM-powered query expansion
+- Multi-level caching system
+- Version-specific searches
+
+## Data Flow
+
+```mermaid
+graph TD
+    A[Frontend] --> B[Go API]
+    B --> C[MongoDB/Config]
+    B --> D[Redis/Queue]
+    B --> E[S3/CSV]
+    D --> F[Training Service]
+    F --> G[Qdrant/Vectors]
+    A --> H[Search Service]
+    H --> G
+    H --> I[LLM/Response]
+```
 
 ---
 
-# Key Features: Search Technology 🎯
+# Technical Implementation
 
-## Hybrid Search
-- Combined semantic & lexical search
-- BM25 algorithm integration
-- Intent-aware scoring
-- Dynamic weight adjustment
-
-## Results Processing
-- Cross-encoder reranking
-- Context-aware filtering
-- Relevance scoring
-- Real-time adaptation
-
----
-
-# Training Pipeline 🚀
-
-## Data Processing
-- Domain-specific text enhancement
-- Automatic schema mapping
-- Custom field handling
+## Configuration Management
+- Model versioning
+- Schema mapping
+- Training configuration
 - Incremental updates
+- Status tracking
 
-## Model Management
-- Multiple embedding models
+```json
+{
+  "config": {
+    "id": "config_id",
+    "version": "20240315",
+    "schema_mapping": {
+      "namecolumn": "product_name",
+      "descriptioncolumn": "description",
+      "customcolumns": [...]
+    },
+    "training_config": {
+      "embeddingmodel": "all-MiniLM-L6-v2",
+      "batchsize": 128
+    }
+  }
+}
+```
+
+## RAG Pipeline
+
+### 1. Query Processing
+- Text preprocessing
+- LLM-based query expansion
+- Context enrichment
+- Semantic caching
+
+### 2. Vector Search
+- Multi-model support
+- Version-aware retrieval
+- Similarity scoring
+- Metadata filtering
+
+### 3. Response Generation
+- Context assembly
+- LLM-powered recommendations
+- Result formatting
+- Cache management
+
+---
+
+# Key Features
+
+## Versioning
+- Multiple model versions
+- Incremental updates
+- Version-specific searches
+- Historical data retention
+
+## Caching System
+- Query cache
+- Embedding cache
+- Semantic similarity cache
+- Response cache
+
+## Performance Optimizations
+- Batch processing
+- Parallel execution
+- GPU acceleration
+- Memory management
+
+---
+
+# Development Setup
+
+## Prerequisites
+- Docker & Docker Compose
+- Go 1.21+
+- Python 3.9+
+- NVIDIA GPU (recommended)
+
+## Services Required
+- MongoDB
+- Redis
+- Qdrant
+- LocalStack (S3)
+- NVIDIA Container Runtime
+
+## Environment Variables
+```bash
+# API Configuration
+MONGO_URI=mongodb://localhost:27017
+REDIS_HOST=redis
+S3_BUCKET=product-data
+
+# Training Configuration
+TRANSFORMER_CACHE=/app/cache
+MODEL_CACHE_DIR=/app/models
+CUDA_VISIBLE_DEVICES=0
+
+# Search Configuration
+QDRANT_HOST=qdrant
+HUGGINGFACE_TOKEN=your_token
+```
+
+## Quick Start
+1. Clone repository
+2. Set environment variables
+3. Run setup script:
+```bash
+docker-compose up -d
+```
+
+---
+
+# Monitoring & Maintenance
+
+## Health Checks
+- API service status
+- Training queue length
+- Search service metrics
+- Model performance
+
+## Logging
+- Request tracking
+- Error monitoring
+- Performance metrics
+- Resource usage
+
+---
+
+# API Documentation
+
+## Configuration Endpoints
+- POST /config - Create new config
+- GET /config/:id - Get config details
+- GET /config/status/:id - Check training status
+
+## Search Endpoints
+- POST /search - Product search
+- GET /health - Service health check
+
+---
+
+# Best Practices
+
+## Data Management
+- Regular backups
 - Version control
-- Automatic initialization
-- Performance monitoring
+- Data validation
+- Schema enforcement
+
+## Security
+- Input validation
+- Rate limiting
+- Authentication
+- Secure file handling
 
 ---
 
-# Architecture Overview 🏗️
-
-## Services
-1. **Search Service**
-   - Query processing
-   - Real-time search
-   - Result ranking
-
-2. **Training Service**
-   - Model training
-   - Data preprocessing
-   - Version management
-
-3. **API Service**
-   - Configuration
-   - Job coordination
-   - Request routing
-
----
-
-# Implementation Deep Dive 💻
-
-## Search Process
-```mermaid
-graph LR
-    A[Query Input] --> B[Query Understanding]
-    B --> C[Hybrid Search]
-    C --> D[Result Ranking]
-    D --> E[Final Results]
-```
-
-## Training Process
-```mermaid
-graph LR
-    A[Data Input] --> B[Preprocessing]
-    B --> C[Model Training]
-    C --> D[Validation]
-    D --> E[Deployment]
-```
-
----
-
-# Performance Metrics 📊
+# Performance Metrics
 
 ## Search Quality
-- Response time < 200ms
-- Relevance score > 85%
-- Query understanding accuracy > 90%
+- Response time: ~200ms
+- Cache hit ratio: >80%
+- Query understanding: >90%
+- Result relevance: >85%
 
 ## System Performance
-- 99.9% uptime
-- Scalable to millions of products
-- Real-time updates
-
----
-
-# Security & Reliability 🔒
-
-## Security Features
-- Rate limiting
-- Input validation
-- Secure file handling
-- Authentication
-
-## Monitoring
-- Real-time health checks
-- Performance tracking
-- Error logging
-- Resource monitoring
-
----
-
-# Getting Started 🚀
-
-## Quick Setup
-1. Clone repository
-2. Configure environment
-3. Run with Docker Compose
-4. Monitor services
-
-## Requirements
-- Docker and Docker Compose
-- NVIDIA GPU (recommended)
-- 8GB+ RAM
-- 20GB+ disk space
-
----
-
-# Future Roadmap 🗺️
-
-## Short Term
-- Enhanced personalization
-- A/B testing framework
-- More language support
-
-## Long Term
-- Multi-modal search
-- Real-time learning
-- Advanced analytics
-
----
-
-# Thank You! 👋
+- Training throughput: 1M products/hour
+- Memory efficiency: <4GB RAM/instance
+- GPU utilization: >80%
+- Cache effectiveness: >90%

@@ -8,7 +8,7 @@ import numpy as np
 import json
 from pathlib import Path
 import redis
-from datetime import datetime  # Fix import - remove the duplicate import
+from datetime import datetime
 import threading
 from collections import OrderedDict
 from sentence_transformers import SentenceTransformer
@@ -21,7 +21,7 @@ import io
 import re
 from enum import Enum
 from config import AppConfig
-from vector_store import VectorStore
+from vector_store import VectorStore  
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -53,7 +53,7 @@ class ModelCache:
 
     def put(self, model_path: str, data: Dict):
         with self.lock:
-            if model_path in self.cache:
+            if (model_path in self.cache):
                 self.cache.move_to_end(model_path)
             else:
                 if len(self.cache) >= self.max_size:
@@ -140,6 +140,113 @@ class S3Manager:
         except Exception as e:
             logger.error(f"Failed to upload {local_path}: {e}")
             return False
+
+    def normalize_path(self, path: str) -> str:
+        """Normalize S3 path with smarter path handling"""
+        path = path.lstrip("/")
+
+        # Don't add models/ prefix for data files
+        if path.startswith("data/"):
+            return path
+
+        # Add models/ prefix only for model-related files
+        if not path.startswith("models/"):
+            path = f"models/{path}"
+
+        return path
+
+    def get_csv_content(self, s3_path: str, retries: int = 3) -> Optional[pd.DataFrame]:
+        """Enhanced CSV loading with proper path handling"""
+        normalized_path = self.normalize_path(s3_path)
+        logger.info(f"Attempting to load CSV from path: {s3_path}")
+        logger.info(f"Normalized path: {normalized_path}")
+
+        for attempt in range(retries):
+            try:
+                response = self.s3.get_object(Bucket=self.bucket, Key=normalized_path)
+                content = response["Body"].read()
+
+                if isinstance(content, bytes):
+                    csv_buffer = io.BytesIO(content)
+                else:
+                    csv_buffer = io.BytesIO(content.encode("utf-8"))
+
+                try:
+                    df = pd.read_csv(csv_buffer)
+                    logger.info(
+                        f"Successfully loaded CSV with {len(df)} rows from {normalized_path}"
+                    )
+                    return df
+                except pd.errors.EmptyDataError:
+                    logger.error(f"CSV file is empty: {normalized_path}")
+                    return None
+                except pd.errors.ParserError as e:
+                    logger.error(f"Error parsing CSV: {str(e)}")
+                    return None
+
+            except self.s3.exceptions.NoSuchKey:
+                logger.warning(
+                    f"File not found in S3: {normalized_path} (attempt {attempt + 1}/{retries})"
+                )
+                if attempt == retries - 1:
+                    # Try without models/ prefix as last resort
+                    try:
+                        direct_path = path.lstrip("/")
+                        response = self.s3.get_object(
+                            Bucket=self.bucket, Key=direct_path
+                        )
+                        df = pd.read_csv(io.BytesIO(response["Body"].read()))
+                        logger.info(
+                            f"Successfully loaded CSV using direct path: {direct_path}"
+                        )
+                        return df
+                    except Exception:
+                        return None
+            except Exception as e:
+                logger.error(f"S3 error (attempt {attempt + 1}/{retries}): {str(e)}")
+                if attempt == retries - 1:
+                    return None
+
+            time.sleep(1 * (attempt + 1))
+
+        return None
+
+    def safe_upload_file(self, local_path: str, s3_path: str, retries: int = 3) -> bool:
+        """Upload file with retries and verification"""
+        normalized_path = self.normalize_path(s3_path)
+
+        for attempt in range(retries):
+            try:
+                content_type = {
+                    ".json": "application/json",
+                    ".npy": "application/octet-stream",
+                    ".csv": "text/csv",
+                }.get(Path(local_path).suffix, "application/octet-stream")
+
+                self.s3.upload_file(
+                    local_path,
+                    self.bucket,
+                    normalized_path,
+                    ExtraArgs={"ContentType": content_type},
+                )
+
+                # Verify upload
+                if self.verify_file_exists(normalized_path):
+                    logger.info(
+                        f"Successfully uploaded and verified: {normalized_path}"
+                    )
+                    return True
+
+            except Exception as e:
+                logger.error(
+                    f"Upload error (attempt {attempt + 1}/{retries}): {str(e)}"
+                )
+                if attempt == retries - 1:
+                    return False
+
+            time.sleep(1 * (attempt + 1))
+
+        return False
 
 
 class EmbeddingManager:
@@ -273,36 +380,11 @@ class EmbeddingManager:
 class ProductTrainer:
     def __init__(self):
         self.default_embedding_model = "sentence-transformers/all-MiniLM-L6-v2"
-        self.vector_store = VectorStore()
+        self.vector_store = None  # Initialize as None
         self.embedding_manager = EmbeddingManager()
         self.s3_manager = S3Manager()
-        self.domain_processors = {
-            "food": self._enhance_food_text,
-            "tech": self._enhance_tech_text,
-            "general": self._enhance_general_text,
-        }
         self._id_counter = 0
         self._id_cache = {}
-
-    def _enhance_food_text(self, text: str, metadata: Dict) -> str:
-        """Enhance food product text with domain-specific information"""
-        parts = [text]
-        if metadata.get("ingredients"):
-            parts.append(f"Ingredients: {metadata['ingredients']}")
-        if metadata.get("cook_time"):
-            parts.append(f"Cooking time: {metadata['cook_time']}")
-        return " ".join(parts)
-
-    def _enhance_tech_text(self, text: str, metadata: Dict) -> str:
-        """Enhance tech product text with specifications"""
-        parts = [text]
-        if metadata.get("specifications"):
-            parts.append(f"Specs: {metadata['specifications']}")
-        return " ".join(parts)
-
-    def _enhance_general_text(self, text: str, metadata: Dict) -> str:
-        """Default text enhancement"""
-        return text
 
     def _process_text(self, row: pd.Series, schema: Dict) -> str:
         """Enhanced text processing with custom columns"""
@@ -327,41 +409,79 @@ class ProductTrainer:
             return " ".join(filter(None, text_parts[:3]))  # Return basic text if error
 
     def _load_data(self, config: Dict) -> Optional[pd.DataFrame]:
+        """Enhanced data loading with better path handling and logging"""
         try:
             data_source = config["data_source"]
             current_file = data_source["location"]
+            logger.info(f"Loading current data from: {current_file}")
 
-            logger.info(f"Attempting to load CSV from location: {current_file}")
+            # Try to load the CSV file
+            current_df = self.s3_manager.get_csv_content(current_file)
+            if current_df is None:
+                # Attempt with alternate path formats
+                alternate_paths = [
+                    current_file,
+                    current_file.lstrip("/"),
+                    f"data/{current_file}",
+                    f"data/{current_file.lstrip('/')}",
+                ]
 
-            logger.info(f"S3 Configuration - Bucket: {self.s3_manager.bucket}")
-            logger.info(f"S3 Endpoint URL: {AppConfig.AWS_ENDPOINT_URL}")
+                for path in alternate_paths:
+                    logger.info(f"Attempting alternate path: {path}")
+                    current_df = self.s3_manager.get_csv_content(path)
+                    if current_df is not None:
+                        break
 
-            df = self.s3_manager.get_csv_content(current_file)
-            if df is None:
-                raise ValueError(f"Failed to load CSV from {current_file}")
+            if current_df is None:
+                raise ValueError(f"Failed to load current CSV from {current_file}")
 
-            logger.info(f"Successfully loaded CSV with shape: {df.shape}")
+            logger.info(
+                f"Successfully loaded current data with shape: {current_df.shape}"
+            )
 
             # Handle append mode
             if config.get("mode") == "append" and config.get("previous_version"):
                 prev_path = f"models/{config['previous_version']}/products.csv"
                 logger.info(f"Loading previous version from: {prev_path}")
+
                 prev_df = self.s3_manager.get_csv_content(prev_path)
                 if prev_df is not None:
-                    df = pd.concat([prev_df, df], ignore_index=True)
-                    logger.info(f"Combined shape after append: {df.shape}")
+                    logger.info(f"Loaded previous data with shape: {prev_df.shape}")
 
-            return df
+                    # Remove duplicates based on ID column if specified
+                    if "idcolumn" in config["schema_mapping"]:
+                        id_col = config["schema_mapping"]["idcolumn"]
+                        combined_df = pd.concat(
+                            [prev_df, current_df], ignore_index=True
+                        )
+                        combined_df = combined_df.drop_duplicates(
+                            subset=[id_col], keep="last"
+                        )
+                        logger.info(
+                            f"Combined shape after deduplication: {combined_df.shape}"
+                        )
+                    else:
+                        combined_df = pd.concat(
+                            [prev_df, current_df], ignore_index=True
+                        )
+                        logger.info(f"Combined shape: {combined_df.shape}")
+
+                    return combined_df
+                else:
+                    logger.warning(
+                        f"Previous version not found: {prev_path}, using only current data"
+                    )
+                    return current_df
+
+            return current_df
 
         except Exception as e:
-            logger.error(f"Error loading data: {str(e)}")
+            logger.error(f"Error loading data: {str(e)}", exc_info=True)
             raise
 
     def _process_metadata(self, row: pd.Series, schema: Dict, config_id) -> Dict:
-        """Process metadata using MongoDB _id directly"""
         try:
             mongo_id = str(config_id)
-
             return {
                 "mongo_id": mongo_id,
                 "id": str(row.get(schema["idcolumn"], "")),
@@ -374,71 +494,217 @@ class ProductTrainer:
                     if col["name"] in row
                 },
             }
-
         except Exception as e:
             logger.error(f"Metadata processing failed: {str(e)}")
             raise
 
     def train(self, job: Dict) -> bool:
-        """Enhanced training with improved ID handling"""
+        """Enhanced training with improved error handling and data access"""
         try:
-            config_id = (
-                job["_id"]["$oid"] if isinstance(job["_id"], dict) else job["_id"]
-            )
-            collection_name = f"products_{config_id}"
-            schema = job["schema_mapping"]
+            logger.info(f"Starting training with job: {str(job)[:100]}...")
+            
+            # Extract config data from job structure
+            if isinstance(job, dict):
+                if "config" in job:
+                    config = job["config"]
+                else:
+                    config = job  # Job itself is the config
+            
+            if not config:
+                raise ValueError("Invalid job structure - missing config")
+
+            # Create ModelConfig from dictionary
+            model_config = {
+                "id": config.get("id"),
+                "name": config.get("name"),
+                "description": config.get("description", ""),
+                "vector_size": config.get("vector_size", 384),  # Default size
+                "embedding_model": config.get("embedding_model", "sentence-transformers/all-MiniLM-L6-v2"),
+                "index_config": {
+                    "type": "hnsw",
+                    "distance_metric": "cosine",
+                    "hnsw_m": 16,
+                    "hnsw_ef_construction": 200,
+                    "hnsw_ef": 100
+                },
+                "data_source": config.get("data_source", {}),
+                "schema_mapping": config.get("schema_mapping", {})
+            }
+
+            logger.info(f"Processing config: {model_config['id']}")
+
+            # Initialize vector store with explicit vector size
+            vector_size = 384  # Default for all-MiniLM-L6-v2
+            if model_config.get("vector_size"):
+                vector_size = model_config["vector_size"]
+
+            self.vector_store = VectorStore({
+                "id": model_config["id"],
+                "vector_size": vector_size,  # Make sure this is set
+                "index_config": model_config.get("index_config", {
+                    "type": "hnsw",
+                    "distance_metric": "cosine",
+                    "hnsw_m": 16,
+                    "hnsw_ef_construction": 200,
+                    "hnsw_ef": 100
+                })
+            })
+
+            # Process training
+            schema = config["schema_mapping"]
+            collection_name = f"products_{model_config['id']}"
 
             # Load and process data
-            df = self._load_data(job)
-            if df.empty:
+            df = self._load_data({
+                "data_source": config["data_source"],
+                "mode": config.get("mode", "replace"),
+                "previous_version": config.get("previous_version"),
+                "schema_mapping": schema
+            })
+
+            if df is None or df.empty:
                 raise ValueError("Empty dataset after loading")
 
-
-            # Generate embeddings
-            model_name = job["training_config"]["embeddingmodel"]
+            # Apply domain-specific enhancements to text based on product categories
+            df = self._enhance_product_data(df, schema)
+            
+            # Generate better quality embeddings with domain awareness
+            model_name = config["training_config"]["embeddingmodel"]
             expected_dim = self.embedding_manager.get_model_dimension(model_name)
-            texts = df.apply(
-                lambda row: self._process_text(row, schema), axis=1
-            ).tolist()
-            embeddings = self.embedding_manager.generate_embedding(texts, model_name)
+            
+            # Process text with improved contextual awareness
+            texts = df.apply(lambda row: self._process_text(row, schema), axis=1).tolist()
+            
+            # Generate embeddings with potential chunking for very large datasets
+            chunk_size = 1000  # Process in chunks to avoid memory issues
+            all_embeddings = []
+            
+            for i in range(0, len(texts), chunk_size):
+                chunk_texts = texts[i:i+chunk_size]
+                chunk_embeddings = self.embedding_manager.generate_embedding(chunk_texts, model_name)
+                all_embeddings.append(chunk_embeddings)
+                
+            embeddings = np.vstack(all_embeddings) if len(all_embeddings) > 1 else all_embeddings[0]
 
-            # Create collection with metadata
-            if not self.vector_store.create_collection(
-                collection_name,
-                {
-                    "config_id": config_id,
-                    "embedding_model": model_name,
-                    "embedding_dimension": expected_dim,
-                    "schema_version": job.get("version", "1.0"),
-                    "record_count": len(df),
-                    "created_at": datetime.now().isoformat(),
-                },
-            ):
+            # Create collection with enhanced metadata
+            collection_name = f"products_{model_config['id']}"
+            collection_metadata = {
+                "config_id": model_config["id"],
+                "embedding_model": model_name,
+                "embedding_dimension": expected_dim,
+                "schema_version": config.get("version", "1.0"),
+                "record_count": len(df),
+                "created_at": datetime.now().isoformat(),
+                "data_source_columns": list(df.columns),
+                "domain": config.get("domain", "general"),
+                "schema_mapping": schema,
+                "index_config": model_config["index_config"]
+            }
+
+            if not self.vector_store.create_collection(collection_name, collection_metadata):
                 raise RuntimeError("Collection setup failed")
 
-            # Process metadata and store vectors
+            # Process metadata with improved structure
             metadata_list = []
-            valid_ids = []
-
             for _, row in df.iterrows():
                 try:
-                    metadata = self._process_metadata(row, schema, config_id)
+                    metadata = self._process_metadata(row, schema, model_config["id"])
+                    # Ensure all text fields are properly normalized
+                    for key, value in metadata.items():
+                        if isinstance(value, str):
+                            metadata[key] = value.strip()
                     metadata_list.append(metadata)
                 except Exception as e:
-                    logger.error(f"Skipping invalid row: {str(e)}")
+                    logger.warning(f"Skipping invalid row: {str(e)}")
                     continue
 
-            # Store vectors with normalized IDs
+            # Store vectors with optimized batching
             if not self.vector_store.upsert_vectors(
-                collection_name, embeddings, metadata_list, valid_ids
+                collection_name=collection_name,
+                embeddings=embeddings,
+                metadata_list=metadata_list,
+                ids=[str(i) for i in range(len(metadata_list))]
             ):
                 raise RuntimeError("Vector storage failed")
 
+            logger.info(f"Training completed successfully for config: {model_config['id']}")
             return True
 
         except Exception as e:
             logger.error(f"Training pipeline failed: {str(e)}")
-            raise
+            return False
+
+    def _enhance_product_data(self, df, schema):
+        """Enhance product data with domain-specific processing"""
+        try:
+            # Get column mappings
+            name_col = schema.get("namecolumn")
+            desc_col = schema.get("descriptioncolumn")
+            cat_col = schema.get("categorycolumn")
+            
+            if not all([name_col, desc_col, cat_col]):
+                return df  # Skip enhancement if required columns missing
+                
+            # Copy dataframe to avoid modifying original
+            enhanced_df = df.copy()
+            
+            # Group products by category for domain-specific processing
+            categories = df[cat_col].unique()
+            
+            for category in categories:
+                # Apply category-specific enhancements
+                cat_mask = enhanced_df[cat_col] == category
+                cat_products = enhanced_df[cat_mask]
+                
+                if "water" in category.lower() or "filter" in category.lower():
+                    # Enhance water-related product descriptions
+                    enhanced_df.loc[cat_mask, desc_col] = cat_products[desc_col].apply(
+                        lambda x: self._enhance_text_with_keywords(
+                            x, 
+                            ["clean", "purify", "filter", "portable", "drinking", "safe"]
+                        )
+                    )
+                elif "outdoor" in category.lower() or "camping" in category.lower():
+                    # Enhance outdoor product descriptions
+                    enhanced_df.loc[cat_mask, desc_col] = cat_products[desc_col].apply(
+                        lambda x: self._enhance_text_with_keywords(
+                            x, 
+                            ["portable", "durable", "lightweight", "compact", "survival"]
+                        )
+                    )
+                    
+            return enhanced_df
+        except Exception as e:
+            logger.warning(f"Error enhancing product data: {str(e)}")
+            return df  # Return original if enhancement fails
+
+    def _enhance_text_with_keywords(self, text, keywords):
+        """Enhance text with relevant keywords if they're not already present"""
+        if not text:
+            return text
+            
+        text_lower = text.lower()
+        enhancements = []
+        
+        for keyword in keywords:
+            if keyword not in text_lower:
+                # Check if semantically similar words are present
+                # This is a simple implementation - could be improved with word embeddings
+                if not any(similar in text_lower for similar in self._get_similar_words(keyword)):
+                    enhancements.append(keyword)
+                    
+        if enhancements:
+            # Add keywords as additional context without changing original text
+            enhanced_text = f"{text} [Related: {', '.join(enhancements)}]"
+            return enhanced_text
+        
+        return text
+
+    def _get_similar_words(self, word):
+        """Get similar words for a given keyword"""
+        # This is a simple implementation - could be replaced with word embeddings
+        similarity_map = AppConfig.DOMAIN_KEYWORDS
+        return similarity_map.get(word, [])
 
     def _validate_embeddings(self, embeddings: np.ndarray, model_name: str) -> bool:
         """Enhanced embedding validation"""
@@ -507,6 +773,7 @@ class ProductTrainer:
                     "model": config.get("version", "unknown"),
                     "created_at": datetime.now().isoformat(),
                 },
+                "data_source": config["data_source"],  # Save data source info
             }
 
             with open(os.path.join(model_dir, "metadata.json"), "w") as f:
@@ -532,7 +799,7 @@ class ProductTrainer:
 
             return True
         except Exception as e:
-            logger.error(f"Error saving embeddings: {e}")
+            logger.error(f"Error saving embeddings: e")
             return False
 
     def _upload_model_files(self, local_dir: str, model_path: str) -> bool:
@@ -580,31 +847,80 @@ class TrainingWorker:
     def process_job(self, job: Dict):
         """Process a single training job"""
         try:
-            config = job.get("config", {})
-            config_id = config.get("_id")
+            logger.info(f"Processing job for config: {job.get('config_id')}")
+            config = None
 
+            # Extract config properly from job structure
+            if isinstance(job, dict):
+                if "config" in job:
+                    config = job["config"]
+                elif all(k in job for k in ["id", "name", "schema_mapping"]):
+                    config = job  # Job itself is the config
+
+            if not config:
+                raise ValueError("Invalid job structure - missing config")
+
+            # Set default values for required fields
+            config.setdefault("embedding_model", "sentence-transformers/all-MiniLM-L6-v2")
+            config.setdefault("vector_size", 384)  # Default for all-MiniLM-L6-v2
+            
+            # Set default index config if missing
+            if not config.get("index_config") or not config["index_config"].get("type"):
+                config["index_config"] = {
+                    "type": "hnsw",
+                    "distance_metric": "cosine",
+                    "hnsw_m": 16,
+                    "hnsw_ef_construction": 200,
+                    "hnsw_ef": 100
+                }
+
+            # Update the training configuration
+            config.setdefault("training_config", {})
+            config["training_config"].update({
+                "model_type": "transformer",
+                "embeddingmodel": config.get("embedding_model", "sentence-transformers/all-MiniLM-L6-v2"),
+                "batch_size": 128,
+                "max_tokens": 512,
+                "validation_split": 0.2
+            })
+
+            # Ensure data source format is set
+            if "data_source" in config and isinstance(config["data_source"], dict):
+                config["data_source"].setdefault("format", "csv")
+                if not config["data_source"].get("options"):
+                    config["data_source"]["options"] = {}
+
+            config_id = config.get("id")
             if not config_id:
-                raise ValueError("Invalid job structure - missing config ID")
+                raise ValueError("Config ID is required")
 
-            logger.info(f"Processing job for config: {config_id}")
+            logger.info(f"Processing config: {config_id}")
             self._update_status(config_id, ModelStatus.PROCESSING, progress=0)
+            self.update_api_status(config_id, ModelStatus.PROCESSING.value, progress=0)
 
             # Use schema mapping directly without conversion
-            success = self.trainer.train(config)
+            success = self.trainer.train({
+                "config": config,
+                "config_id": config_id
+            })
 
             if success:
                 self._update_status(config_id, ModelStatus.COMPLETED, progress=100)
+                self.update_api_status(config_id, ModelStatus.COMPLETED.value, progress=100)
             else:
                 self._update_status(
                     config_id, ModelStatus.FAILED, error="Training failed"
                 )
+                self.update_api_status(config_id, ModelStatus.FAILED.value, error="Training failed")
 
         except Exception as e:
             logger.error(f"Error processing job: {e}")
-            if "config" in job and "_id" in job["config"]:
+            config_id = job.get("config_id") or (job.get("config", {}).get("id"))
+            if config_id:
                 self._update_status(
-                    job["config"]["_id"], ModelStatus.FAILED, error=str(e)
+                    config_id, ModelStatus.FAILED, error=str(e)
                 )
+                self.update_api_status(config_id, ModelStatus.FAILED.value, error=str(e))
             else:
                 logger.error("Could not update status: invalid job structure")
 
@@ -704,6 +1020,7 @@ class TrainingWorker:
         while not self.should_stop:
             try:
                 result = self.redis.brpop(AppConfig.TRAINING_QUEUE, timeout=1)
+                print(result)
                 if result:
                     _, job_data = result
                     job = json.loads(job_data)

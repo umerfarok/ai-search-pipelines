@@ -367,7 +367,7 @@ const SearchResults = ({ results, naturalResponse, queryInfo, currentPage, total
                             </span>
                             <span className="text-xs text-gray-500 dark:text-gray-400 mt-1">ID: {result.id}</span>
                         </div>
-                    </div>
+                    </div> 
 
                     <div className="mt-3 pt-3 border-t dark:border-gray-700">
                         <div className="grid grid-cols-2 gap-4">

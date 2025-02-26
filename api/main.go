@@ -7,7 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time" 
+	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -168,3 +168,4 @@ func main() {
 
 	log.Println("Server exited gracefully")
 }
+

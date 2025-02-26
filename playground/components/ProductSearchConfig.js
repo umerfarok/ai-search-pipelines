@@ -704,7 +704,7 @@ const SchemaMapping = ({ config, setConfig, csvHeaders, validationErrors }) => {
             />
         </FormSection>
     );
-};
+}; 
 
 // Main Component
 export default function ProductSearchConfig() {

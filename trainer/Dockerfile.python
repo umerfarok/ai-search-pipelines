@@ -23,6 +23,12 @@ RUN pip install --no-cache-dir \
     einops==0.7.0 \
     flask==3.0.2 \
     triton \
+    sentencepiece \
+    accelerate \
+    bitsandbytes \
+    cachetools \
+    asyncio \
+    aiohttp \
     -r requirements.txt
     
 # Install spacy model separately
