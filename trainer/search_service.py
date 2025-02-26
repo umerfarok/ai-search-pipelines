@@ -1,27 +1,42 @@
+from concurrent.futures import ThreadPoolExecutor
 import os
 import logging
-import time
-from typing import Dict, List, Optional, Tuple
-import torch
-import torch.nn.functional as F
-import numpy as np
-import json
-from pathlib import Path
-import redis
-import boto3
-from botocore.exceptions import ClientError
-from botocore.config import Config
-import pandas as pd
-import io
-from dataclasses import dataclass
-from datetime import datetime
 import threading
-from collections import OrderedDict
-import onnxruntime as ort
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from datetime import datetime
+from typing import Dict, List, Optional
+import torch
+import numpy as np
 from sentence_transformers import SentenceTransformer
-from peft import PeftModel, PeftConfig
 from flask import Flask, request, jsonify
+import requests
+from config import AppConfig
+from vector_store import VectorStore  # Updated import
+import re
+from threading import Thread
+from queue import Queue
+import contextlib
+import torch.cuda
+from cachetools import TTLCache
+from transformers import (
+    pipeline,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    TextIteratorStreamer,
+    BitsAndBytesConfig,
+)
+import json
+import pandas as pd
+import time
+from typing import Dict, List, Optional, Tuple, Any
+from sentence_transformers import CrossEncoder
+import torch
+from vector_store import VectorStore
+from simple_cache import TimedCache  # Change SimpleCache to TimedCache
+from training_service import EmbeddingManager
+from config import AppConfig
+import re
+from sklearn.feature_extraction.text import TfidfVectorizer
+import spacy
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,559 +44,853 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 
-@dataclass
-class AppConfig:
-    REDIS_HOST: str = os.getenv("REDIS_HOST", "localhost")
-    REDIS_PORT: int = int(os.getenv("REDIS_PORT", 6379))
-    REDIS_PASSWORD: str = os.getenv("REDIS_PASSWORD", "")
-    MODEL_CACHE_SIZE: int = int(os.getenv("MODEL_CACHE_SIZE", 4))
-    MIN_SCORE: float = float(os.getenv("MIN_SCORE", 0.2))
-    AWS_ACCESS_KEY: str = os.getenv("AWS_ACCESS_KEY")
-    AWS_SECRET_KEY: str = os.getenv("AWS_SECRET_KEY")
-    S3_BUCKET: str = os.getenv("S3_BUCKET")
-    S3_REGION: str = os.getenv("AWS_REGION", "us-east-1")
-    AWS_SSL_VERIFY: bool = os.getenv("AWS_SSL_VERIFY", "true").lower() == "true"
-    AWS_ENDPOINT_URL: str = os.getenv("AWS_ENDPOINT_URL")
-    DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
-    MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", 3))
-    RETRY_DELAY: int = int(os.getenv("RETRY_DELAY", 1))
-
-    # Model configurations
-    AVAILABLE_LLM_MODELS = {
-        "distilgpt2-product": {
-            "name": "distilgpt2",
-            "description": "Fast, lightweight model for product search",
-            "peft_supported": True,
-        },
-        "all-minilm-l6": {
-            "name": "sentence-transformers/all-MiniLM-L6-v2",
-            "description": "Efficient embedding model for semantic search",
-            "peft_supported": False,
-        },
-    }
-    DEFAULT_MODEL = "distilgpt2-product"
-
-    # Simplified directory structure
-    BASE_MODEL_DIR: str = os.getenv("BASE_MODEL_DIR", "/app/models")
-    MODEL_CACHE_DIR: str = os.getenv("MODEL_CACHE_DIR", "/app/model_cache")
-    TRANSFORMER_CACHE: str = os.getenv(
-        "TRANSFORMER_CACHE", "/app/model_cache/transformers"
-    )
-    HF_HOME: str = os.getenv("HF_HOME", "/app/model_cache/huggingface")
-
-    @classmethod
-    def setup_cache_dirs(cls):
-        """Setup cache directories"""
-        directories = [
-            cls.BASE_MODEL_DIR,
-            cls.MODEL_CACHE_DIR,
-            cls.TRANSFORMER_CACHE,
-            cls.HF_HOME,
-            os.path.join(cls.HF_HOME, "datasets"),
-        ]
-
-        for directory in directories:
-            os.makedirs(directory, exist_ok=True)
-
-        os.environ.update(
-            {
-                "TORCH_HOME": cls.MODEL_CACHE_DIR,
-                "TRANSFORMERS_CACHE": cls.TRANSFORMER_CACHE,
-                "HF_HOME": cls.HF_HOME,
-                "HF_DATASETS_CACHE": os.path.join(cls.HF_HOME, "datasets"),
-            }
-        )
-
-class ModelCache:
-    def __init__(self, max_size: int = 4):
-        self.cache = OrderedDict()
-        self.max_size = max_size
-        self.lock = threading.Lock()
-
-    def get(self, model_path: str) -> Optional[Dict]:
-        with self.lock:
-            if model_path in self.cache:
-                self.cache.move_to_end(model_path)
-                return self.cache[model_path]
-            return None
-
-    def put(self, model_path: str, data: Dict):
-        with self.lock:
-            if model_path in self.cache:
-                self.cache.move_to_end(model_path)
-            else:
-                if len(self.cache) >= self.max_size:
-                    self.cache.popitem(last=False)
-                self.cache[model_path] = data
-
-    def _save_to_cache(self, cache_path: str, data: Dict):
-        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-
-        # Save embeddings
-        np.save(f"{cache_path}/embeddings.npy", data["embeddings"])
-
-        # Save metadata
-        with open(f"{cache_path}/metadata.json", "w") as f:
-            json.dump(data["metadata"], f)
-
-        # Save ONNX model if available
-        if "onnx_model" in data:
-            onnx_path = os.path.join(AppConfig.ONNX_CACHE_DIR, f"{cache_path}.onnx")
-            os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
-            torch.onnx.save(data["onnx_model"], onnx_path)
-
-    def _load_from_cache(self, cache_path: str) -> Dict:
-        embeddings = np.load(f"{cache_path}/embeddings.npy")
-
-        with open(f"{cache_path}/metadata.json", "r") as f:
-            metadata = json.load(f)
-
-        data = {
-            "embeddings": embeddings,
-            "metadata": metadata,
-            "loaded_at": datetime.now().isoformat(),
-        }
-
-        # Try loading ONNX model
-        onnx_path = os.path.join(AppConfig.ONNX_CACHE_DIR, f"{cache_path}.onnx")
-        if os.path.exists(onnx_path):
-            data["onnx_model"] = ort.InferenceSession(onnx_path)
-
-        return data
-
-
-class S3Manager:
+class EmbeddingManager:
     def __init__(self):
-        retry_config = Config(
-            retries=dict(max_attempts=AppConfig.MAX_RETRIES, mode="adaptive"),
-            s3={"addressing_style": "path"},
-        )
-
-        self.s3 = boto3.client(
-            "s3",
-            aws_access_key_id=AppConfig.AWS_ACCESS_KEY,
-            aws_secret_access_key=AppConfig.AWS_SECRET_KEY,
-            region_name=AppConfig.S3_REGION,
-            endpoint_url=AppConfig.AWS_ENDPOINT_URL,
-            verify=AppConfig.AWS_SSL_VERIFY,
-            config=retry_config,
-        )
-        self.bucket = AppConfig.S3_BUCKET
-
-    def download_file(self, s3_path: str, local_path: str) -> bool:
-        for attempt in range(AppConfig.MAX_RETRIES):
-            try:
-                os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                self.s3.download_file(self.bucket, s3_path, local_path)
-                return True
-            except Exception as e:
-                if attempt == AppConfig.MAX_RETRIES - 1:
-                    logger.error(f"Failed to download {s3_path}: {e}")
-                    return False
-                time.sleep(AppConfig.RETRY_DELAY * (attempt + 1))
-        return False
-
-    def get_csv_content(self, s3_path: str) -> Optional[pd.DataFrame]:
-        try:
-            response = self.s3.get_object(Bucket=self.bucket, Key=s3_path)
-            return pd.read_csv(io.BytesIO(response["Body"].read()))
-        except Exception as e:
-            logger.error(f"Failed to read CSV from S3: {e}")
-            return None
-
-
-class ProductSearchManager:
-    def __init__(self):
-        self.device = torch.device(AppConfig.DEVICE)
-        self.tokenizer = None
-        self.base_model = None
-        self.peft_model = None
-        self.embedding_model = None
-        self.onnx_session = None
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.embedding_models = {}
         self.model_load_lock = threading.Lock()
+        self.max_seq_length = 512
+        self.cache_dir = AppConfig.TRANSFORMER_CACHE
 
-    def load_models(self, model_path: str) -> bool:
-        """Load models with simplified path structure"""
-        with self.model_load_lock:
-            try:
-                model_dir = os.path.join(AppConfig.BASE_MODEL_DIR, model_path)
-                llm_dir = os.path.join(model_dir, "llm")
-                logger.info(f"Loading models from {model_dir}")
+    def get_model(self, model_path: str):
+        if (model := self.embedding_models.get(model_path)) is not None:
+            return model
 
-                # Load metadata
-                metadata_path = os.path.join(model_dir, "metadata.json")
-                if not os.path.exists(metadata_path):
-                    raise ValueError(f"Metadata not found in {model_dir}")
-
-                with open(metadata_path, "r") as f:
-                    metadata = json.load(f)
-
-                # Verify PEFT configuration and adapter file
-                peft_config_path = os.path.join(llm_dir, "adapter_config.json")
-                peft_model_path = os.path.join(llm_dir, "adapter_model.bin")
-
-                is_peft_model = os.path.exists(peft_config_path) and os.path.exists(
-                    peft_model_path
-                )
-
-                # Initialize tokenizer
-                tokenizer_path = os.path.join(llm_dir, "tokenizer.json")
-                if not os.path.exists(tokenizer_path):
-                    raise ValueError("Tokenizer not found")
-
-                self.tokenizer = AutoTokenizer.from_pretrained(llm_dir)
-                if self.tokenizer.pad_token is None:
-                    self.tokenizer.pad_token = self.tokenizer.eos_token
-                    self.tokenizer.padding_side = "left"
-
-                # Load models
-                base_model_name = metadata.get("models", {}).get("llm", "distilgpt2")
-                model_kwargs = {
-                    "device_map": "auto",
-                    "torch_dtype": (
-                        torch.float16 if torch.cuda.is_available() else torch.float32
-                    ),
-                    "low_cpu_mem_usage": True,
-                }
-
-                if is_peft_model:
-                    logger.info("Loading PEFT model...")
-                    self.base_model = AutoModelForCausalLM.from_pretrained(
-                        base_model_name, **model_kwargs
-                    )
-
-                    self.peft_model = PeftModel.from_pretrained(
-                        self.base_model,
-                        llm_dir,
-                        is_trainable=False,
-                        torch_dtype=model_kwargs["torch_dtype"],
-                    )
-                    self.peft_model.eval()
-                else:
-                    logger.info("Loading standard model...")
-                    self.base_model = AutoModelForCausalLM.from_pretrained(
-                        llm_dir, **model_kwargs
-                    )
-                    self.base_model.eval()
-
-                # Load embedding model
-                embedding_model_name = metadata.get("models", {}).get(
-                    "embeddings", "sentence-transformers/all-MiniLM-L6-v2"
-                )
-                self.embedding_model = SentenceTransformer(embedding_model_name)
-                self.embedding_model.to(self.device)
-
-                logger.info(f"Successfully loaded models: PEFT={is_peft_model}")
-                return True
-
-            except Exception as e:
-                logger.error(f"Failed to load model {model_path}. "
-                 f"Existing files: {os.listdir(model_dir) if os.path.exists(model_dir) else 'Missing directory'}")
-                raise
-
-    def generate_response(self, query: str, product_context: str) -> str:
-        """Generate response using appropriate model"""
         try:
-            if self.peft_model:
-                return self._generate_response_peft(query, product_context)
-            elif self.base_model:
-                return self._generate_response_base(query, product_context)
-            else:
-                raise ValueError("No model available for generation")
+            with self.model_load_lock:
+                if model_path not in self.embedding_models:
+                    model = SentenceTransformer(
+                        model_path, cache_folder=self.cache_dir, device=self.device
+                    )
+                    self.embedding_models[model_path] = model
+                return self.embedding_models[model_path]
         except Exception as e:
-            logger.error(f"Error generating response: {e}")
-            return "I apologize, but I couldn't process your query."
-        
-        
-        
-    def _generate_response_base(self, query: str, product_context: str) -> str:
-        """Generate response using base model without PEFT"""
-        try:
-            prompt = f"Query: {query}\nContext: {product_context}\nResponse: "
-            inputs = self.tokenizer(
-                prompt,
-                return_tensors="pt",
-                truncation=True,
-                max_length=512,
-                padding=True,
-            )
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            logger.error(f"Failed to load model {model_path}: {str(e)}")
+            raise
 
-            with torch.inference_mode():
-                outputs = self.base_model.generate(
-                    **inputs,
-                    max_new_tokens=200,
-                    num_beams=4,
-                    temperature=0.7,
-                    top_p=0.95,
-                    do_sample=True,
-                    pad_token_id=self.tokenizer.eos_token_id,
-                    repetition_penalty=1.2,
-                    no_repeat_ngram_size=3,
-                    early_stopping=True,
-                )
+    def generate_embedding(self, text: List[str], model_path: str) -> np.ndarray:
+        if not text:
+            raise ValueError("Empty text input")
 
-            response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-            response = response.split("Response: ")[-1].strip()
-            return response if response else "I couldn't generate a meaningful response."
+        model = self.get_model(model_path)
+        batch_size = 128
 
-        except Exception as e:
-            logger.error(f"Error in base model response generation: {e}")
-            return "I apologize, but there was an error processing your query."
-    def _generate_response_peft(self, query: str, product_context: str) -> str:
-        """Generate response using PEFT model"""
-        try:
-            prompt = f"Query: {query}\nContext: {product_context}\nResponse: "
-            inputs = self.tokenizer(
-                prompt,
-                return_tensors="pt",
-                truncation=True,
-                max_length=512,
-                padding=True,
-            )
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
-
-            with torch.inference_mode():
-                outputs = self.peft_model.generate(
-                    **inputs,
-                    max_new_tokens=200,
-                    num_beams=4,
-                    temperature=0.7,
-                    top_p=0.95,
-                    do_sample=True,
-                    pad_token_id=self.tokenizer.eos_token_id,
-                    repetition_penalty=1.2,
-                    no_repeat_ngram_size=3,
-                    early_stopping=True,
-                )
-
-            response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-            response = response.split("Response: ")[-1].strip()
-            return (
-                response if response else "I couldn't generate a meaningful response."
-            )
-
-        except Exception as e:
-            logger.error(f"Error in PEFT response generation: {e}")
-            return "I apologize, but there was an error processing your query."
-
-    def generate_embedding(self, text: str) -> np.ndarray:
-        """Generate embedding using the sentence transformer model"""
         try:
             with torch.no_grad():
-                embedding = self.embedding_model.encode(
-                    text, convert_to_tensor=True, show_progress_bar=False
+                embeddings = model.encode(
+                    text,
+                    batch_size=batch_size,
+                    show_progress_bar=False,
+                    convert_to_tensor=True,
+                    normalize_embeddings=True,
                 )
-                return embedding.cpu().numpy()
+                return embeddings.cpu().numpy()
         except Exception as e:
-            logger.error(f"Error generating embedding: {e}")
+            logger.error(f"Error generating embeddings: {e}")
             raise
+        finally:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+
+class UnifiedLLMManager:
+    def __init__(self):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model_name = "microsoft/Phi-3-mini-4k-instruct"
+        self.model = None
+        self.tokenizer = None
+        self.model_lock = threading.Lock()
+        self._initialize_model()
+
+    def _initialize_model(self):
+        hf_token = os.getenv("HUGGINGFACE_TOKEN")
+        if not hf_token:
+            logger.warning("Hugging Face token not found!")
+
+        try:
+            logger.info(f"Loading model: {self.model_name}")
+            quant_config = (
+                BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_use_double_quant=True,
+                    trust_remote_code=True,
+                )
+                if torch.cuda.is_available()
+                else None
+            )
+
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.model_name, token=hf_token
+            )
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_name,
+                torch_dtype=(
+                    torch.float16 if torch.cuda.is_available() else torch.float32
+                ),
+                device_map="auto",
+                quantization_config=quant_config,
+                token=hf_token,
+                trust_remote_code=True,
+            )
+            logger.info(f"Successfully loaded {self.model_name}")
+        except Exception as e:
+            logger.error(f"Model load failed: {e}")
+            raise
+
+    @contextlib.contextmanager
+    def get_model(self):
+        with self.model_lock:
+            yield self.model, self.tokenizer
+
+    def generate_streamed(self, prompt: str, max_length: int = 1024) -> Queue:
+        output_queue = Queue()
+        streamer = TextIteratorStreamer(self.tokenizer)
+
+        def generate():
+            try:
+                with self.get_model() as (model, tokenizer):
+                    inputs = tokenizer(prompt, return_tensors="pt").to(self.device)
+                    model.generate(
+                        **inputs,
+                        max_length=max_length,
+                        streamer=streamer,
+                        do_sample=True,
+                        temperature=0.7,
+                        top_p=0.95,
+                    )
+            except Exception as e:
+                output_queue.put({"error": str(e)})
+
+        Thread(target=generate).start()
+        for text in streamer:
+            output_queue.put({"text": text})
+        output_queue.put(None)
+        return output_queue
+
+
+class EnhancedSearchService:
+    def __init__(self):
+        self.embedding_manager = EmbeddingManager()
+        self.vector_store = VectorStore()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.llm_manager = None
+        try:
+            self.llm_manager = UnifiedLLMManager()
+            logger.info("LLM Manager initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize LLM Manager: {e}")
+        self.response_cache = TTLCache(maxsize=1000, ttl=3600)
+        self.query_cache = TTLCache(maxsize=1000, ttl=3600)
+        self.embedding_cache = TTLCache(maxsize=10000, ttl=3600)  # Cache embeddings for 1 hour
+        self.semantic_cache = TTLCache(maxsize=1000, ttl=1800)    # Cache similar queries for 30 mins
+        self.config_cache = TTLCache(maxsize=100, ttl=300)        # Cache configs for 5 mins
+        self.query_similarity_threshold = 0.85
+
+    def _cache_key(self, query: str, model_path: str) -> str:
+        """Generate cache key for query+model combination"""
+        return f"{model_path}:{query}"
+
+    def _get_similar_cached_query(self, query: str, model_path: str) -> Optional[Dict]:
+        """Find semantically similar cached query results"""
+        if not self.semantic_cache:
+            return None
+            
+        query_embedding = self._get_cached_embedding(query, model_path)
+        if query_embedding is None:
+            return None
+            
+        for cached_query, cached_results in self.semantic_cache.items():
+            cached_embedding = self._get_cached_embedding(cached_query, model_path)
+            if cached_embedding is not None:
+                similarity = np.dot(query_embedding, cached_embedding)
+                if similarity > self.query_similarity_threshold:
+                    return cached_results
+        return None
+
+    def _get_cached_embedding(self, text: str, model_path: str) -> Optional[np.ndarray]:
+        """Get cached embedding or generate new one"""
+        cache_key = self._cache_key(text, model_path)
+        if cache_key in self.embedding_cache:
+            return self.embedding_cache[cache_key]
+            
+        embedding = self.embedding_manager.generate_embedding([text], model_path)
+        if embedding is not None:
+            self.embedding_cache[cache_key] = embedding[0]
+            return embedding[0]
+        return None
+
+    def _fetch_config(self, model_path: str) -> Dict:
+        """Fetch configuration from API with fallback to local cache."""
+        try:
+            if model_path in self.config_cache:
+                return self.config_cache[model_path]
+                
+            # Extract config_id from model_path
+            config_id = model_path.split("/")[-1]
+            
+            # Try API first
+            url = f"{AppConfig.API_HOST}/config/{config_id}"
+            try:
+                response = requests.get(url, timeout=5)
+                response.raise_for_status()
+                config = response.json()
+                logger.info(f"Fetched config for ID: {config_id} from API")
+                self.config_cache[model_path] = config
+                
+                # Save to local cache file for future use
+                self._save_config_to_cache(config_id, config)
+                
+                return config
+            except requests.RequestException as e:
+                logger.error(f"Failed to fetch config from {url}: {e}")
+                
+                # Try to load from local cache
+                cached_config = self._load_config_from_cache(config_id)
+                if cached_config:
+                    logger.info(f"Using cached config for ID: {config_id}")
+                    self.config_cache[model_path] = cached_config
+                    return cached_config
+                
+                # Infer config from vector store metadata
+                collection_name = f"products_{config_id}"
+                collection_meta = self.vector_store.get_collection_metadata(collection_name)
+                
+                if collection_meta:
+                    logger.info(f"Using metadata-derived config for ID: {config_id}")
+                    inferred_config = {
+                        "id": config_id,
+                        "training_config": {
+                            "embeddingmodel": collection_meta.get("embedding_model", "sentence-transformers/all-MiniLM-L6-v2")
+                        },
+                        "schema_mapping": collection_meta.get("schema_mapping", {})
+                    }
+                    self.config_cache[model_path] = inferred_config
+                    return inferred_config
+                
+                # If all else fails, use default config
+                logger.warning(f"Using default config for ID: {config_id}")
+                default_config = {
+                    "id": config_id,
+                    "training_config": {
+                        "embeddingmodel": "sentence-transformers/all-MiniLM-L6-v2"
+                    },
+                    "schema_mapping": {
+                        "customcolumns": []
+                    }
+                }
+                self.config_cache[model_path] = default_config
+                return default_config
+                
+        except Exception as e:
+            logger.error(f"Error in _fetch_config: {e}")
+            # Return minimal default config as last resort
+            return {
+                "id": model_path.split("/")[-1],
+                "training_config": {
+                    "embeddingmodel": "sentence-transformers/all-MiniLM-L6-v2"
+                },
+                "schema_mapping": {
+                    "customcolumns": []
+                }
+            }
+
+    def _save_config_to_cache(self, config_id: str, config: Dict) -> None:
+        """Save config to local cache file."""
+        try:
+            cache_dir = os.path.join("/app", "cache", "configs")
+            os.makedirs(cache_dir, exist_ok=True)
+            
+            cache_file = os.path.join(cache_dir, f"{config_id}.json")
+            with open(cache_file, 'w') as f:
+                json.dump(config, f)
+                
+            logger.info(f"Saved config to cache: {cache_file}")
+        except Exception as e:
+            logger.warning(f"Failed to save config to cache: {e}")
+
+    def _load_config_from_cache(self, config_id: str) -> Optional[Dict]:
+        """Load config from local cache file."""
+        try:
+            cache_file = os.path.join("/app", "cache", "configs", f"{config_id}.json")
+            if os.path.exists(cache_file):
+                with open(cache_file, 'r') as f:
+                    config = json.load(f)
+                return config
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to load config from cache: {e}")
+            return None
+
+    def _expand_query(self, query: str) -> str:
+        """Expand query using LLM"""
+        cache_key = f"query_expansion:{query}"
+        if cache_key in self.query_cache:
+            return self.query_cache[cache_key]
+
+        prompt = f"""As a search query expansion expert, enhance this product search query:
+        Query: {query}
+        
+        Instructions:
+        1. Identify key concepts and intent
+        2. Add relevant synonyms and related terms
+        3. Include product attributes and categories
+        4. Keep expansion focused and relevant
+        
+        Enhanced query:"""
+
+        try:
+            if not self.llm_manager:
+                return query
+            response_queue = self.llm_manager.generate_streamed(prompt)
+            expanded_query = ""
+            while True:
+                item = response_queue.get()
+                if item is None:
+                    break
+                if "error" in item:
+                    raise Exception(item["error"])
+                expanded_query += item["text"]
+            final_query = f"{query} {expanded_query.strip()}"
+            self.query_cache[cache_key] = final_query
+            return final_query
+        except Exception as e:
+            logger.error(f"Query expansion failed: {e}")
+            return query
+
+    def _semantic_search(
+        self, query: str, model_path: str, top_k: int = 5
+    ) -> List[Dict]:
+        """Perform semantic search using vector database with better error handling."""
+        try:
+            # Get config - new robust version will always return something
+            config = self._fetch_config(model_path)
+            
+            embedding_model = config.get("training_config", {}).get(
+                "embeddingmodel", 
+                "sentence-transformers/all-MiniLM-L6-v2"
+            )
+            config_id = model_path.split("/")[-1]
+            collection_name = f"products_{config_id}"
+
+            # Verify collection exists
+            if not self.vector_store.collection_exists(collection_name):
+                logger.error(f"Collection not found: {collection_name}")
+                return []
+
+            # Generate query embedding
+            try:
+                query_embedding = self.embedding_manager.generate_embedding([query], embedding_model)
+            except Exception as e:
+                logger.error(f"Failed to generate embedding: {e}")
+                # Try fallback model
+                try:
+                    fallback_model = "sentence-transformers/all-MiniLM-L6-v2"
+                    logger.info(f"Trying fallback embedding model: {fallback_model}")
+                    query_embedding = self.embedding_manager.generate_embedding([query], fallback_model)
+                except Exception as e2:
+                    logger.error(f"Fallback embedding also failed: {e2}")
+                    return []
+
+            # Perform vector search
+            results = self.vector_store.search(
+                collection_name=collection_name,
+                query_vector=query_embedding[0].tolist(),
+                limit=top_k,
+            )
+            
+            # Format results
+            schema_mapping = config.get("schema_mapping", {"customcolumns": []})
+            formatted_results = [
+                self._format_search_result(result, schema_mapping)
+                for result in results
+            ]
+            
+            return formatted_results
+            
+        except Exception as e:
+            logger.error(f"Semantic search failed: {e}")
+            return []
+
+    def _format_search_result(self, result: Dict, schema_mapping: Dict) -> Dict:
+        """Format search result using schema mapping from Qdrant payload"""
+        try:
+            metadata = result.get("metadata", {})
+            custom_metadata = metadata.get("custom_metadata", {})
+            expected_cols = [
+                col["name"] for col in schema_mapping.get("customcolumns", [])
+            ]
+            missing_cols = [col for col in expected_cols if col not in custom_metadata]
+            if missing_cols:
+                logger.warning(
+                    f"Missing metadata columns in result {result.get('id')}: {missing_cols}"
+                )
+
+            return {
+                "mongo_id": metadata.get("mongo_id", ""),
+                "score": round(float(result.get("score", 0.0)), 4),
+                "name": metadata.get("name", ""),
+                "description": metadata.get("description", ""),
+                "category": metadata.get("category", ""),
+                "metadata": custom_metadata,
+                "qdrant_id": result.get("id", ""),
+            }
+        except Exception as e:
+            logger.error(f"Result formatting error: {str(e)}")
+            return {"error": "Result formatting failed"}
+
+    def _format_result_for_frontend(self, result: Dict) -> Dict:
+        """Format a single result for frontend display"""
+        try:
+            metadata = result.get("metadata", {})
+            return {
+                "id": result.get("mongo_id", ""),
+                "name": result.get("name", ""),
+                "description": result.get("description", ""),
+                "category": result.get("category", ""),
+                "score": round(float(result.get("score", 0.0)), 4),
+                **{
+                    k: str(v) for k, v in metadata.items()
+                },
+                "url": f"/product/{result.get('mongo_id', '')}",
+            }
+        except Exception as e:
+            logger.error(f"Result formatting error: {e}")
+            return {"error": "Formatting failed"}
+
+    def _generate_response(self, query: str, results: List[Dict]) -> str:
+        """Generate response using LLM"""
+        if not self.llm_manager:
+            return self._generate_fallback_response(results)
+
+        if not isinstance(results, list):
+            logger.error(f"Expected 'results' to be a list, got {type(results)}")
+            return self._generate_fallback_response(results)
+
+        product_context = "\n".join(
+            [
+                f"- {p['name']} ({p.get('category', 'N/A')}): "
+                f"{p.get('description', '')[:150]}... "
+                f"Price: {p.get('metadata', {}).get('discount_price', 'N/A')} "
+                f"Ratings: {p.get('metadata', {}).get('ratings', 'N/A')} "
+                for p in results[:3]
+            ]
+        )
+
+        prompt = f"""<|user|>
+        I'm looking for: {query}
+
+        Available relevant products:
+        {product_context}
+
+        Please recommend products considering:
+        1. Price vs value analysis
+        2. Feature match to query
+        3. Popularity signals
+        4. Concise natural language response
+
+        <|assistant|>
+        """
+
+        try:
+            logger.info("Starting response generation")
+            with self.llm_manager.get_model() as (model, tokenizer):
+                inputs = tokenizer(prompt, return_tensors="pt").to(self.device)
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=150,
+                    temperature=0.7,
+                    top_p=0.95,
+                    repetition_penalty=1.1,
+                    do_sample=True,
+                    pad_token_id=tokenizer.eos_token_id,
+                )
+                response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+                logger.info("Response generation completed")
+                return response.split("<|assistant|>")[-1].strip()
+        except Exception as e:
+            logger.error(f"Response generation failed: {e}")
+            return self._generate_fallback_response(results)
+
+    def _generate_fallback_response(self, results: List[Dict]) -> str:
+        """Generate a simple structured response when LLM fails"""
+        try:
+            if not isinstance(results, list):
+                raise ValueError(f"Expected results to be a list, got {type(results)}")
+            response = "Here are some relevant products:\n\n"
+            for p in results[:3]:
+                metadata = p.get("metadata", {})
+                price = metadata.get("discount_price", "Price not available")
+                ratings = metadata.get("ratings", "No ratings")
+                response += f"- {p.get('name', 'Unknown')}\n"
+                response += f"  Price: {price}\n"
+                response += f"  Ratings: {ratings}\n\n"
+            return response
+        except Exception as e:
+            logger.error(f"Fallback response generation failed: {e}")
+            return "Unable to generate product recommendations."
+
+    def _format_frontend_response(
+        self, results: List[Dict], generated_text: str, query: str, expanded_query: str
+    ) -> Dict:
+        """Structure response for frontend consumption"""
+        try:
+            return {
+                "generated_response": generated_text,
+                "results": [self._format_result_for_frontend(res) for res in results],
+                "search_metadata": {
+                    "original_query": query,
+                    "expanded_query": expanded_query,
+                    "total_results": len(results),
+                    "timestamp": datetime.now().isoformat(),
+                },
+            }
+        except Exception as e:
+            logger.error(f"Failed to format frontend response: {e}")
+            return {"error": "Failed to format response", "message": str(e)}
+
+    def _preprocess_query(self, query: str) -> str:
+        """Clean and normalize search query"""
+        query = query.lower().strip()
+        query = re.sub(r"[^\w\s-]", "", query)
+        return query
+
+    def _apply_filters(self, results: List[Dict], filters: Dict) -> List[Dict]:
+        """Apply post-search filters"""
+        filtered = []
+        for res in results:
+            metadata = res.get("metadata", {})
+            match = True
+            if "max_price" in filters:
+                price_str = metadata.get("discount_price", "0")
+                price = float(re.sub(r"[^\d.]", "", price_str)) if price_str else 0
+                if price > filters["max_price"]:
+                    match = False
+            if "categories" in filters:
+                if res.get("category", "").lower() not in [
+                    c.lower() for c in filters["categories"]
+                ]:
+                    match = False
+            if match:
+                filtered.append(res)
+        return filtered
+
+    def search(
+        self, query: str, model_path: str, top_k: int = 5, filters: Dict = None
+    ) -> Dict:
+        """Enhanced search with better configuration integration"""
+        try:
+            # Preprocess query
+            query = self._preprocess_query(query)
+            
+            # Get config_id from model_path
+            config_id = model_path.split("/")[-1]
+            collection_name = f"products_{config_id}"
+            
+            # Verify collection exists
+            if not self.vector_store.collection_exists(collection_name):
+                logger.error(f"Collection {collection_name} not found")
+                return {
+                    "error": "Model not found",
+                    "status": "failed"
+                }
+
+            # Get collection metadata to determine correct embedding model
+            collection_meta = self.vector_store.get_collection_metadata(collection_name)
+            if not collection_meta:
+                raise ValueError("Collection metadata not found")
+
+            # Use the embedding model specified in collection metadata
+            embedding_model = collection_meta.get("embedding_model")
+            if not embedding_model:
+                embedding_model = "sentence-transformers/all-MiniLM-L6-v2"
+
+            # Check cache for similar queries
+            cache_key = self._cache_key(query, embedding_model)
+            if cache_key in self.response_cache:
+                logger.info("Returning cached results")
+                return self.response_cache[cache_key]
+
+            # Expand query with domain awareness
+            expanded_query = self._expand_query(query)
+            logger.info(f"Expanded query: '{query}' -> '{expanded_query}'")
+
+            # Generate embedding using correct model
+            query_embedding = self._get_cached_embedding(expanded_query, embedding_model)
+            if query_embedding is None:
+                query_embedding = self.embedding_manager.generate_embedding(
+                    [expanded_query], 
+                    embedding_model
+                )[0]
+                self.embedding_cache[cache_key] = query_embedding
+
+            # Perform vector search with proper parameter naming
+            vector_results = self.vector_store.search(
+                collection_name=collection_name,
+                query_vector=query_embedding.tolist() if isinstance(query_embedding, np.ndarray) else query_embedding,
+                limit=top_k,  # Use limit instead of top_k
+                filters=self._prepare_filters(filters, collection_meta.get("schema_mapping", {}))
+            )
+
+            # Format results according to schema mapping
+            formatted_results = [
+                self._format_search_result(result, collection_meta["schema_mapping"])
+                for result in vector_results
+            ]
+
+            # Generate response with LLM
+            generated_response = self._generate_response(query, formatted_results)
+
+            # Prepare final response
+            response = self._format_frontend_response(
+                formatted_results,
+                generated_response,
+                query,
+                expanded_query
+            )
+
+            # Cache the response
+            self.response_cache[cache_key] = response
+            
+            return response
+
+        except Exception as e:
+            logger.error(f"Search failed: {str(e)}", exc_info=True)
+            return {
+                "error": str(e),
+                "status": "failed"
+            }
+
+    def _prepare_filters(self, filters: Dict, schema_mapping: Dict) -> Dict:
+        """Convert frontend filters to vector store format"""
+        if not filters:
+            return {}
+
+        prepared_filters = {}
+        filter_fields = schema_mapping.get("filter_fields", [])
+        
+        for field, value in filters.items():
+            if field in filter_fields:
+                if isinstance(value, list):
+                    prepared_filters[f"metadata.{field}"] = {"$in": value}
+                else:
+                    prepared_filters[f"metadata.{field}"] = value
+
+        return prepared_filters
 
 
 class SearchService:
     def __init__(self):
-        self.s3_manager = S3Manager()
-        self.model_cache = ModelCache(AppConfig.MODEL_CACHE_SIZE)
-        self.device = AppConfig.DEVICE
-        self.product_search = ProductSearchManager()
-
-    def load_model(self, model_path: str) -> Optional[Dict]:
-        """Load model with simplified directory structure"""
+        self.vector_store = VectorStore()
+        self.embedding_manager = EmbeddingManager()
+        self.cache = TimedCache(ttl_seconds=300)  # Use TimedCache instead
+        self.cross_encoder = None
+        self.use_cross_encoder = True
+        self.hybrid_search = True
+        
+        # Initialize NLP if available
         try:
-            # Try loading from cache first
-            cached_data = self.model_cache.get(model_path)
-            if cached_data:
-                return cached_data
+            self.nlp = spacy.load("en_core_web_md")
+        except:
+            logger.warning("Could not load spaCy model")
+            self.nlp = None
+        
+        self.domain_keywords = AppConfig.DOMAIN_KEYWORDS
+        self._load_cross_encoder()
 
-            # Load from local directory
-            model_dir = os.path.join(AppConfig.BASE_MODEL_DIR, model_path)
-            if os.path.exists(model_dir):
-                return self._load_from_local(model_dir, model_path)
+    def search(self, config_id: str, query: str, top_k: int = 10, 
+               threshold: float = 0.5, use_hybrid: bool = True,
+               rerank: bool = True) -> List[Dict]:
+        """
+        Perform semantic search with enhanced relevance using updated config structure
+        """
+        start_time = time.time()
+        
+        if not query or not config_id:
+            logger.error("Missing required search parameters")
+            return []
+        
+        collection_name = f"products_{config_id}"
+        
+        # Get collection metadata
+        collection_meta = self.vector_store.get_collection_metadata(collection_name)
+        if not collection_meta:
+            logger.error(f"Collection {collection_name} not found")
+            return []
+            
+        # Use embedding model from collection metadata
+        model_name = collection_meta.get("embedding_model")
+        if not model_name:
+            logger.error("No embedding model specified in collection metadata")
+            return []
 
-            # Fall back to S3
-            return self._load_from_s3(model_path)
+        # Process and expand query
+        expanded_query = self.expand_query(query)
+        logger.info(f"Expanded query: {expanded_query}")
+        
+        # Generate embedding using the correct model
+        query_embedding = self.embedding_manager.generate_embedding(
+            [expanded_query], 
+            model_name
+        )
+        
+        if query_embedding is None:
+            logger.error("Failed to generate query embedding")
+            return []
 
-        except Exception as e:
-            logger.error(f"Error loading model: {e}")
-            raise
+        # Perform vector search with proper metadata structure
+        results = self.vector_store.search(
+            collection_name=collection_name,
+            query_vector=query_embedding[0],
+            top_k=top_k,
+            threshold=threshold
+        )
 
-    def _load_from_local(self, model_dir: str, model_path: str) -> Optional[Dict]:
-        """Load model from local directory"""
-        try:
-            # Load embeddings and metadata
-            embeddings = np.load(os.path.join(model_dir, "embeddings.npy"))
+        if not results:
+            return []
 
-            with open(os.path.join(model_dir, "metadata.json"), "r") as f:
-                metadata = json.load(f)
-
-            # Initialize models
-            if not self.product_search.load_models(model_path):
-                raise ValueError("Failed to initialize models")
-
-            data = {
-                "embeddings": embeddings,
-                "metadata": metadata,
-                "loaded_at": datetime.now().isoformat(),
-            }
-
-            # Cache the loaded data
-            self.model_cache.put(model_path, data)
-            return data
-
-        except Exception as e:
-            logger.error(f"Error loading from local: {e}")
-            return None
-
-    def _load_from_s3(self, model_path: str) -> Optional[Dict]:
-        """Load model from S3"""
-        try:
-            model_dir = os.path.join(AppConfig.BASE_MODEL_DIR, model_path)
-            os.makedirs(os.path.join(model_dir, "llm"), exist_ok=True)
-
-            # Download required files
-            files_to_download = [
-                "embeddings.npy",
-                "metadata.json",
-                "products.csv",
-                "llm/adapter_config.json",
-                "llm/adapter_model.bin",
-                "llm/tokenizer.json",
-                "llm/special_tokens_map.json",
-                "llm/tokenizer_config.json",
-            ]
-
-            for file in files_to_download:
-                s3_path = f"{model_path}/{file}"
-                local_path = os.path.join(model_dir, file)
-
-                if not self.s3_manager.download_file(s3_path, local_path):
-                    logger.error(f"Failed to download required file: {file}")
-                    return None
-
-            # Load the downloaded model
-            return self._load_from_local(model_dir, model_path)
-
-        except Exception as e:
-            logger.error(f"Error loading from S3: {e}")
-            return None
-
-    def search(self, query: str, model_path: str, max_items: int = 10) -> Dict:
-        """Perform semantic search with response generation"""
-        try:
-            # Load model data
-            model_data = self.load_model(model_path)
-            if not model_data:
-                raise ValueError(f"Failed to load model from {model_path}")
-
-            # Generate query embedding
-            query_embedding = self.product_search.generate_embedding(query)
-
-            # Calculate similarities
-            similarities = np.dot(model_data["embeddings"], query_embedding)
-            top_k_idx = np.argsort(similarities)[-max_items:][::-1]
-
-            # Load products
-            products_df = self._load_products(model_path)
-            if products_df is None:
-                raise ValueError("Failed to load products data")
-
-            # Prepare results
-            results = []
-            schema = model_data["metadata"]["config"]["schema_mapping"]
-
-            for idx in top_k_idx:
-                score = float(similarities[idx])
-                if score < AppConfig.MIN_SCORE:
-                    continue
-
-                product = products_df.iloc[idx]
+        # Format results according to updated schema
+        formatted_results = []
+        for item in results:
+            try:
+                metadata = item.get("metadata", {})
                 result = {
-                    "id": str(product[schema["id_column"]]),
-                    "name": str(product[schema["name_column"]]),
-                    "description": str(product[schema["description_column"]]),
-                    "category": str(product[schema["category_column"]]),
-                    "score": score,
-                    "metadata": {},
+                    "id": metadata.get("id"),
+                    "name": metadata.get("name"),
+                    "description": metadata.get("description"),
+                    "category": metadata.get("category"),
+                    "score": float(item.get("score", 0.0)),
+                    "metadata": metadata.get("custom_metadata", {})
                 }
+                formatted_results.append(result)
+            except Exception as e:
+                logger.error(f"Error formatting result: {e}")
+                continue
 
-                # Add custom metadata
-                for col in schema.get("custom_columns", []):
-                    if col["role"] == "metadata" and col["user_column"] in product:
-                        result["metadata"][col["standard_column"]] = str(
-                            product[col["user_column"]]
-                        )
+        # Apply cross-encoder reranking if enabled
+        if rerank and self.cross_encoder and len(formatted_results) > 1:
+            try:
+                reranked_results = self._rerank_results(
+                    query, 
+                    formatted_results
+                )
+                formatted_results = reranked_results
+            except Exception as e:
+                logger.error(f"Reranking failed: {e}")
 
-                results.append(result)
+        search_time = time.time() - start_time
+        logger.info(f"Search completed in {search_time:.3f}s")
+        
+        return formatted_results
 
-            # Generate response
-            if results:
-                product_context = self._create_product_context(results[:3])
-                response = self.product_search.generate_response(query, product_context)
-            else:
-                response = "No matching products found."
+    def _rerank_results(self, query: str, results: List[Dict]) -> List[Dict]:
+        """Rerank results using cross-encoder with updated metadata structure"""
+        pairs = []
+        for result in results:
+            text = f"{result['name']} {result['description']}"
+            pairs.append([query, text])
 
+        scores = self.cross_encoder.predict(pairs)
+        
+        # Update scores and sort
+        for idx, score in enumerate(scores):
+            results[idx]["score"] = float(score)
+            
+        return sorted(results, key=lambda x: x["score"], reverse=True)
+
+    def expand_query(self, query: str) -> str:
+        """Enhanced query expansion with domain awareness"""
+        if not query:
+            return query
+
+        expanded_terms = []
+        
+        # Add domain-specific terms
+        for domain, terms in self.domain_keywords.items():
+            if any(kw in query.lower() for kw in terms):
+                expanded_terms.extend(terms[:3])  # Add top 3 related terms
+        
+        # Use NLP for semantic expansion if available
+        if self.nlp:
+            doc = self.nlp(query)
+            for token in doc:
+                if token.pos_ in ["NOUN", "ADJ"] and token.has_vector:
+                    # Find similar words using word vectors
+                    similars = token.similarity(doc)
+                    if similars > 0.7:
+                        expanded_terms.append(token.text)
+
+        # Remove duplicates and combine
+        expanded_terms = list(set(expanded_terms))
+        if expanded_terms:
+            expanded_query = f"{query} {' '.join(expanded_terms)}"
+            logger.info(f"Expanded query: {query} -> {expanded_query}")
+            return expanded_query
+
+        return query
+
+    def get_collection_stats(self, config_id: str) -> Dict:
+        """Get statistics for a collection"""
+        collection_name = f"products_{config_id}"
+        
+        try:
+            # Get collection metadata
+            metadata = self.vector_store.get_collection_metadata(collection_name)
+            if not metadata:
+                return {"error": "Collection not found"}
+                
+            # Get additional statistics
+            stats = self.vector_store.get_collection_stats(collection_name)
+            
             return {
-                "results": results,
-                "total": len(results),
-                "natural_response": response,
-                "query_info": {
-                    "original": query,
-                    "model_path": model_path,
-                },
+                "config_id": config_id,
+                "metadata": metadata,
+                "stats": stats
             }
-
         except Exception as e:
-            logger.error(f"Search error: {e}")
-            raise
-    def _load_products(self, model_path: str) -> Optional[pd.DataFrame]:
-        """Load products data from local storage or S3"""
-        # Try local storage first
-        local_path = os.path.join(AppConfig.BASE_MODEL_DIR, model_path, "products.csv")
-        if os.path.exists(local_path):
-            return pd.read_csv(local_path)
-
-        # Fall back to S3
-        return self.s3_manager.get_csv_content(f"{model_path}/products.csv")
-
-    def _create_product_context(self, products: List[Dict]) -> str:
-        """Create context string from product information"""
-        context = "Available products:\n\n"
-        for idx, product in enumerate(products, 1):
-            context += f"{idx}. {product['name']}\n"
-            context += f"   Description: {product['description']}\n"
-            context += f"   Category: {product['category']}\n"
-            if product.get("metadata"):
-                for key, value in product["metadata"].items():
-                    context += f"   {key}: {value}\n"
-            context += "\n"
-        return context
+            logger.error(f"Error getting collection stats: {str(e)}")
+            return {"error": str(e)}
 
 
+def load_model(model_path: str) -> Any:
+    """Load a trained model from the specified path."""
+    # Ensure model_path is correctly passed from ModelConfig.ModelPath
+    # ...existing code...
 
-# Initialize service
-search_service = SearchService()
-AppConfig.setup_cache_dirs()
 
+def search(model, query: str, top_k: int = 5) -> list:
+    """Perform a search using the specified model."""
+    # ...existing code...
+
+
+search_service = EnhancedSearchService()
 
 
 @app.route("/search", methods=["POST"])
 def search():
-    """Handle search requests"""
+    """Search endpoint with API config support"""
     try:
         data = request.get_json()
-        if not data or "model_path" not in data or "query" not in data:
-            return jsonify({"error": "Invalid request"}), 400
+        if not data or "query" not in data or "model_path" not in data:
+            return jsonify({"error": "Missing required fields"}), 400
 
-        results = search_service.search(
-            query=data["query"],
-            model_path=data["model_path"],
-            max_items=data.get("max_items", 10),
-        )
-        return jsonify(results)
+        logger.info(f"Received search request for query: {data['query']}")
+        with ThreadPoolExecutor() as executor:
+            future = executor.submit(
+                search_service.search,
+                query=data["query"],
+                model_path=data["model_path"],
+                top_k=data.get("max_items", 20),
+                filters=data.get("filters", {}),
+            )
+            response = future.result(timeout=500)
 
+        logger.info("Search request completed successfully")
+        return jsonify(response)
     except Exception as e:
-        logger.error(f"Search error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"Search endpoint error: {str(e)}", exc_info=True)
+        return jsonify({"error": "Search failed", "message": str(e)}), 500
 
 
 @app.route("/health")
@@ -590,16 +899,13 @@ def health():
     return jsonify(
         {
             "status": "healthy",
-            "device": AppConfig.DEVICE,
-            "model_dir": AppConfig.BASE_MODEL_DIR,
-            "model_types": {
-                "peft_available": search_service.product_search.peft_model is not None,
-                "base_available": search_service.product_search.base_model is not None,
-            },
+            "device": "cuda" if torch.cuda.is_available() else "cpu",
+            "models_loaded": list(
+                search_service.embedding_manager.embedding_models.keys()
+            ),
         }
     )
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("SERVICE_PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=AppConfig.SERVICE_PORT, debug=False)

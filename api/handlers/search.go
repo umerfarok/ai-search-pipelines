@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -67,53 +69,48 @@ func (s *SearchService) checkHealth() {
 	defer resp.Body.Close()
 }
 
-type SearchResult struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Description string            `json:"description"`
-	Category    string            `json:"category"`
-	Score       float64           `json:"score"`
-	Metadata    map[string]string `json:"metadata"`
+type SearchRequest struct {
+	Query     string                 `json:"query"`
+	ModelPath string                 `json:"model_path"`
+	MaxItems  int                    `json:"max_items,omitempty"`
+	Alpha     float64                `json:"alpha,omitempty"`
+	Filters   map[string]interface{} `json:"filters,omitempty"`
+	Page      int                    `json:"page,omitempty"`
 }
 
-type SearchResponse struct {
-	Results         []SearchResult `json:"results"`
-	Total           int            `json:"total"`
-	NaturalResponse string         `json:"natural_response"`
-	QueryInfo       QueryInfo      `json:"query_info"`
+type SearchResult struct {
+	ID          string                 `json:"id"`
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	Category    string                 `json:"category"`
+	Score       float64                `json:"score"`
+	Text        string                 `json:"text"`
+	Metadata    map[string]interface{} `json:"metadata"`
+	RerankScore float64                `json:"rerank_score,omitempty"`
 }
 
 type QueryInfo struct {
-	Original  string `json:"original"`
-	ModelPath string `json:"model_path"`
+	Original  string                 `json:"original"`
+	Enhanced  string                 `json:"enhanced"`
+	Analysis  map[string]interface{} `json:"analysis"`
+	ModelPath string                 `json:"model_path"`
+}
+
+type SearchResponse struct {
+	Results      []SearchResult `json:"results,omitempty"`
+	Total        int            `json:"total,omitempty"`
+	QueryInfo    QueryInfo      `json:"query_info,omitempty"`
+	Page         int            `json:"page,omitempty"`
+	MaxItems     int            `json:"max_items,omitempty"`
+	TextResponse string         `json:"text_response,omitempty"`
 }
 
 func (s *SearchService) Search(c *gin.Context) {
-	var req struct {
-		Query     string                 `json:"query"`
-		ModelPath string                 `json:"model_path"`
-		MaxItems  int                    `json:"max_items"`
-		Filters   map[string]interface{} `json:"filters,omitempty"`
-	}
+	var req SearchRequest
 
 	if err := c.BindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
-	}
-
-	// Set default max items
-	if req.MaxItems == 0 {
-		req.MaxItems = 10
-	}
-
-	// If Query or ModelPath is empty, get the latest completed model
-	if req.Query == "" || req.ModelPath == "" {
-		modelConfig, err := s.getModelConfig("latest")
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to get latest model config: %v", err)})
-			return
-		}
-		req.ModelPath = modelConfig.ModelPath
 	}
 
 	// Forward request to search service
@@ -135,22 +132,43 @@ func (s *SearchService) Search(c *gin.Context) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		var errorResp struct {
-			Error string `json:"error"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&errorResp); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "unknown search service error"})
-			return
-		}
-		c.JSON(resp.StatusCode, gin.H{"error": errorResp.Error})
+	// Read the full response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read response: %v", err)})
 		return
 	}
 
-	// Decode response from Python service
+	// Log the raw response for debugging
+	log.Printf("Search service response: %s", string(body))
+
+	if resp.StatusCode != http.StatusOK {
+		var errorResp struct {
+			Error   string `json:"error"`
+			Message string `json:"message,omitempty"`
+		}
+		if err := json.Unmarshal(body, &errorResp); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":        fmt.Sprintf("search service error (status %d)", resp.StatusCode),
+				"raw_response": string(body),
+			})
+			return
+		}
+		c.JSON(resp.StatusCode, errorResp)
+		return
+	}
+
+	// Try to decode as JSON
 	var searchResp SearchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&searchResp); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to decode response: %v", err)})
+	if err := json.Unmarshal(body, &searchResp); err != nil {
+		// If JSON decoding fails, return as text response
+		c.JSON(http.StatusOK, gin.H{
+			"text_response": string(body),
+			"query_info": QueryInfo{
+				Original:  req.Query,
+				ModelPath: req.ModelPath,
+			},
+		})
 		return
 	}
 
@@ -230,6 +248,61 @@ func (s *SearchService) performSearch(req interface{}, modelConfig *config.Model
 	searchResp.ConfigInfo = *modelConfig
 
 	return &searchResp, nil
+}
+
+func (s *SearchService) applyFilters(results []SearchResult, filters map[string]interface{}) []SearchResult {
+	filtered := make([]SearchResult, 0)
+
+	for _, result := range results {
+		if matchesFilters(result, filters) {
+			filtered = append(filtered, result)
+		}
+	}
+
+	return filtered
+}
+
+func matchesFilters(result SearchResult, filters map[string]interface{}) bool {
+	for key, value := range filters {
+		switch key {
+		case "category":
+			if categoryFilter, ok := value.(string); ok {
+				if !matchesCategory(result.Category, categoryFilter) {
+					return false
+				}
+			}
+		case "price":
+			if priceRange, ok := value.([]float64); ok && len(priceRange) == 2 {
+				if price, exists := result.Metadata["price"].(float64); exists {
+					if price < priceRange[0] || price > priceRange[1] {
+						return false
+					}
+				}
+			}
+		default:
+			// Check metadata fields
+			if metaValue, exists := result.Metadata[key]; exists {
+				if filterValue, ok := value.(string); ok {
+					if !matchesMetadataField(metaValue, filterValue) {
+						return false
+					}
+				}
+			}
+		}
+	}
+
+	return true
+}
+
+func matchesCategory(category, filter string) bool {
+	// Implement category matching logic (e.g., exact match, hierarchical, fuzzy)
+	return strings.Contains(strings.ToLower(category), strings.ToLower(filter))
+}
+
+func matchesMetadataField(value interface{}, filter string) bool {
+	// Convert value to string for comparison
+	strValue := fmt.Sprintf("%v", value)
+	return strings.Contains(strings.ToLower(strValue), strings.ToLower(filter))
 }
 
 func (s *SearchService) Close() {
