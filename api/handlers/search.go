@@ -76,7 +76,10 @@ func (s *SearchService) Search(c *gin.Context) {
 
 	resp, err := s.client.Post(searchServiceURL, "application/json", bytes.NewBuffer(requestBody))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to call search service: %v", err)})
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":  fmt.Sprintf("Failed to call search service: %v", err),
+			"status": "failed",
+		})
 		return
 	}
 	defer resp.Body.Close()
@@ -84,32 +87,52 @@ func (s *SearchService) Search(c *gin.Context) {
 	// Read and parse response
 	responseBody, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read search response"})
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":  "Failed to read search response",
+			"status": "failed",
+		})
 		return
 	}
 
-	log.Printf("Search service response: %s", string(responseBody))
+	// Add debug logging to check response structure
+	log.Printf("Raw search response (first 500 chars): %s", string(responseBody)[:min(500, len(responseBody))])
 
 	// If the response status code is not 200, return the error
 	if resp.StatusCode != http.StatusOK {
 		var errorResp map[string]interface{}
 		if err := json.Unmarshal(responseBody, &errorResp); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Search service error: %s", string(responseBody))})
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":  fmt.Sprintf("Search service error: %s", string(responseBody)),
+				"status": "failed",
+			})
 			return
 		}
 		c.JSON(resp.StatusCode, errorResp)
 		return
 	}
 
-	// Parse the response as JSON
-	var searchResponse map[string]interface{}
-	if err := json.Unmarshal(responseBody, &searchResponse); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse search response"})
+	// First try parsing as raw JSON to preserve all fields
+	var rawResponse map[string]interface{}
+	if err := json.Unmarshal(responseBody, &rawResponse); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":      "Failed to parse search response",
+			"status":     "failed",
+			"debug_info": string(responseBody[:min(200, len(responseBody))]),
+		})
 		return
 	}
 
-	// Forward the response to the client
-	c.JSON(http.StatusOK, searchResponse)
+	// Send the complete response structure directly without trying to fit it into our struct
+	// This ensures all fields from Python are passed through
+	c.JSON(http.StatusOK, rawResponse)
+}
+
+// Helper function to get minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func (s *SearchService) Close() {

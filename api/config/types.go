@@ -84,21 +84,46 @@ type SearchRequest struct {
 	Filters  map[string]interface{} `json:"filters,omitempty"`
 }
 
+// Update SearchResult to match Python service response format
 type SearchResult struct {
 	ID          string                 `json:"id"`
 	Name        string                 `json:"name"`
 	Description string                 `json:"description"`
 	Category    string                 `json:"category"`
 	Score       float64                `json:"score"`
+	URL         string                 `json:"url,omitempty"`
 	Metadata    map[string]interface{} `json:"metadata,omitempty"`
 }
 
-type SearchResponse struct {
-	Results      []SearchResult `json:"results,omitempty"`
-	Total        int            `json:"total,omitempty"`
-	ConfigInfo   ModelConfig    `json:"config_info,omitempty"`
-	TextResponse string         `json:"text_response,omitempty"`
+// Enhanced types for search response from Python service
+type SearchMetadata struct {
+	OriginalQuery  string       `json:"original_query"`
+	ExpandedQuery  string       `json:"expanded_query"`
+	OptimizedQuery string       `json:"optimized_query"`
+	TotalResults   int          `json:"total_results"`
+	SearchTime     float64      `json:"search_time"`
+	Timestamp      string       `json:"timestamp"`
+	Intent         SearchIntent `json:"intent"`
+	Suggestion     string       `json:"suggestion,omitempty"`
 }
+
+type SearchIntent struct {
+	Category   string   `json:"category"`
+	Confidence float64  `json:"confidence"`
+	IsQuestion bool     `json:"is_question"`
+	Keywords   []string `json:"keywords"`
+	Action     string   `json:"action,omitempty"`
+	Source     string   `json:"source,omitempty"`
+}
+
+type SearchResponse struct {
+	Results           []SearchResult `json:"results"`
+	GeneratedResponse string         `json:"generated_response"`
+	SearchMetadata    SearchMetadata `json:"search_metadata"`
+	Error             string         `json:"error,omitempty"`
+	Status            string         `json:"status,omitempty"`
+}
+
 type QueuedJob struct {
 	ConfigID  string      `json:"config_id"`
 	Config    ModelConfig `json:"config"`

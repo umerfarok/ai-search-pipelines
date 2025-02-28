@@ -178,47 +178,40 @@ func (s *ConfigService) GetConfig(c *gin.Context) {
 	id := c.Param("id")
 	log.Printf("Get config request for ID: %s", id)
 
-	var objID primitive.ObjectID
-	var err error
-
-	// Try to parse as ObjectID first
-	objID, err = primitive.ObjectIDFromHex(id)
-	if err != nil {
-		// If not an ObjectID, try as string ID
-		log.Printf("ID %s is not a valid ObjectID, trying as string ID", id)
-
-		// Try to find by string ID field if it exists
+	// First try to parse as ObjectID
+	objID, err := primitive.ObjectIDFromHex(id)
+	if err == nil {
+		// Valid ObjectID, try to find by _id
 		var config cfg.ModelConfig
 		err = s.db.Collection("configs").FindOne(
 			context.Background(),
-			bson.M{"id": id}, // Try with string ID field
+			bson.M{"_id": objID},
 		).Decode(&config)
 
-		if err != nil {
-			if err == mongo.ErrNoDocuments {
-				log.Printf("Config with ID %s not found", id)
-				c.JSON(http.StatusNotFound, gin.H{"error": "configuration not found"})
-				return
-			}
-			log.Printf("Database error: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		if err == nil {
+			c.JSON(http.StatusOK, config)
 			return
 		}
-
-		c.JSON(http.StatusOK, config)
-		return
 	}
 
-	// If we got here, it's a valid ObjectID
+	// If not found by ObjectID or not a valid ObjectID, try by string ID
+	log.Printf("ID %s not found as ObjectID or not valid, trying as string ID", id)
+
+	// Try to find by string ID field
 	var config cfg.ModelConfig
 	err = s.db.Collection("configs").FindOne(
 		context.Background(),
-		bson.M{"_id": objID},
+		bson.D{
+			{Key: "$or", Value: bson.A{
+				bson.M{"id": id},
+				bson.M{"_id": id},
+			}},
+		},
 	).Decode(&config)
 
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
-			log.Printf("Config with ObjectID %s not found", id)
+			log.Printf("Config with ID %s not found in any field", id)
 			c.JSON(http.StatusNotFound, gin.H{"error": "configuration not found"})
 			return
 		}
@@ -292,12 +285,15 @@ func (s *ConfigService) UpdateConfigStatus(c *gin.Context) {
 		return
 	}
 
+	log.Printf("Received status update for config ID: %s", configID)
+
 	var updateReq struct {
 		Status    string  `json:"status" binding:"required"`
 		Error     string  `json:"error,omitempty"`
 		Progress  float64 `json:"progress,omitempty"`
 		UpdatedAt string  `json:"updated_at"`
 	}
+
 	if err := c.ShouldBindJSON(&updateReq); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -316,38 +312,91 @@ func (s *ConfigService) UpdateConfigStatus(c *gin.Context) {
 		log.Printf("Warning: Failed to update Redis status: %v", err)
 	}
 
-	// Update MongoDB
+	// Try multiple options to find the config record
+	var updated bool = false
+	var updateErr error = nil
+
+	// Try updating by ObjectID first if valid
 	objID, err := primitive.ObjectIDFromHex(configID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid config id"})
+	if err == nil {
+		// Valid ObjectID format - try to update by _id field
+		result, err := s.updateConfigByField("_id", objID, updateReq)
+		if err == nil && result.MatchedCount > 0 {
+			updated = true
+			log.Printf("Updated config with ObjectID: %s", configID)
+		} else {
+			updateErr = err
+			log.Printf("Failed to update by ObjectID: %v", err)
+		}
+	}
+
+	// If not updated by ObjectID, try by string ID field
+	if !updated {
+		result, err := s.updateConfigByField("id", configID, updateReq)
+		if err == nil && result.MatchedCount > 0 {
+			updated = true
+			log.Printf("Updated config with string ID: %s", configID)
+		} else {
+			updateErr = err
+			log.Printf("Failed to update by string ID: %v", err)
+		}
+	}
+
+	// Try with the raw ID as string (exactly as provided)
+	if !updated {
+		result, err := s.updateConfigByField("_id", configID, updateReq)
+		if err == nil && result.MatchedCount > 0 {
+			updated = true
+			log.Printf("Updated config with raw ID: %s", configID)
+		} else {
+			updateErr = err
+			log.Printf("Failed to update by raw ID: %v", err)
+		}
+	}
+
+	// Return appropriate response
+	if updated {
+		log.Printf("Successfully updated status for config %s to %s", configID, updateReq.Status)
+		c.JSON(http.StatusOK, gin.H{"status": "updated"})
 		return
 	}
+
+	// Log all failed attempts and return error
+	log.Printf("All update attempts for config %s failed: %v", configID, updateErr)
+	c.JSON(http.StatusNotFound, gin.H{"error": "config not found"})
+}
+
+// Helper method to update config by a specific field
+func (s *ConfigService) updateConfigByField(fieldName string, fieldValue interface{}, updateReq struct {
+	Status    string  `json:"status" binding:"required"`
+	Error     string  `json:"error,omitempty"`
+	Progress  float64 `json:"progress,omitempty"`
+	UpdatedAt string  `json:"updated_at"`
+}) (*mongo.UpdateResult, error) {
+	// Prepare update document
 	update := bson.M{
 		"$set": bson.M{
 			"status": updateReq.Status,
 			"error":  updateReq.Error,
 			"updated_at": func() time.Time {
-				t, _ := time.Parse(time.RFC3339, updateReq.UpdatedAt)
+				t, err := time.Parse(time.RFC3339, updateReq.UpdatedAt)
+				if err != nil {
+					return time.Now().UTC()
+				}
 				return t
 			}(),
 		},
 	}
+
+	// Execute update
+	log.Printf("Attempting to update config with %s = %v", fieldName, fieldValue)
 	result, err := s.db.Collection("configs").UpdateOne(
 		context.Background(),
-		bson.M{"_id": objID},
+		bson.M{fieldName: fieldValue},
 		update,
 	)
 
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update config"})
-		return
-	}
-	if result.MatchedCount == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "config not found"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"status": "updated"})
+	return result, err
 }
 
 func (s *ConfigService) validatePreviousVersion(previousVersion string) error {

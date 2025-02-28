@@ -172,6 +172,9 @@ class AppConfig:
     DEFAULT_MODEL = "all-minilm-l6"
     REQUIRED_MODELS = ["all-minilm-l6", "bge-large"]  # Models to preload
 
+    # Fix the API status endpoint path - remove redundant /api prefix
+    API_STATUS_ENDPOINT = "/config/status/"
+    
     @classmethod
     def get_model_path(cls, model_key: str) -> str:
         """Get the full model path from a model key"""
@@ -207,92 +210,6 @@ class AppConfig:
     MIN_SCORE: float = 0.3
     HYBRID_SEARCH_ALPHA: float = 0.7
     RERANKER_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-    DOMAIN_KEYWORDS = {
-        "cooking": [
-            "cook",
-            "recipe",
-            "meal",
-            "ingredient",
-            "bake",
-            "grill",
-            "fry",
-            "boil",
-            "simmer",
-            "spice",
-        ],
-        "tech": [
-            "wifi",
-            "laptop",
-            "battery",
-            "app",
-            "smartphone",
-            "tablet",
-            "charger",
-            "software",
-            "hardware",
-            "gadget",
-        ],
-        "health": [
-            "headache",
-            "remedy",
-            "sleep",
-            "sore",
-            "exercise",
-            "diet",
-            "nutrition",
-            "wellness",
-            "therapy",
-            "medicine",
-        ],
-        "household": [
-            "clean",
-            "tool",
-            "fix",
-            "repair",
-            "maintenance",
-            "appliance",
-            "furniture",
-            "decoration",
-            "garden",
-            "utility",
-        ],
-        "finance": [
-            "investment",
-            "stock",
-            "bank",
-            "loan",
-            "credit",
-            "insurance",
-            "mortgage",
-            "savings",
-            "budget",
-            "tax",
-        ],
-        "education": [
-            "study",
-            "course",
-            "degree",
-            "school",
-            "university",
-            "lecture",
-            "homework",
-            "exam",
-            "teacher",
-            "student",
-        ],
-        "travel": [
-            "flight",
-            "hotel",
-            "tour",
-            "destination",
-            "cruise",
-            "booking",
-            "itinerary",
-            "passport",
-            "visa",
-            "adventure",
-        ]
-    }
     QUERY_EXPANSION_ENABLED: bool = bool(os.getenv("QUERY_EXPANSION_ENABLED", "True"))
     SIMPLE_QUERY_EXPANSION: bool = bool(os.getenv("SIMPLE_QUERY_EXPANSION", "False"))
 

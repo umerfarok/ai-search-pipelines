@@ -15,6 +15,7 @@ import {
     ChevronRight,
     RefreshCw
 } from 'lucide-react';
+import DebugResponse from '../components/DebugResponse';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 
@@ -28,6 +29,19 @@ const useModelSearch = () => {
     const [activeFilters, setActiveFilters] = useState({});
     const [currentPage, setCurrentPage] = useState(1);
     const [totalPages, setTotalPages] = useState(1);
+    const [searchResponse, setSearchResponse] = useState({
+        results: [],
+        generatedResponse: '',
+        searchMetadata: {
+            originalQuery: '',
+            expandedQuery: '',
+            intent: { category: null, confidence: 0 },
+            totalResults: 0,
+            suggestion: ''
+        }
+    });
+    const [searchQuery, setSearchQuery] = useState('');
+    const [searchError, setSearchError] = useState(null);
 
     useEffect(() => {
         fetchModels();
@@ -48,29 +62,57 @@ const useModelSearch = () => {
     };
 
     const performSearch = async (query, filters = {}, page = 1) => {
-        if (!selectedModel || selectedModel.status !== 'completed') return;
+        if (!selectedModel) return;
 
         setSearching(true);
+        setSearchError(null);
         try {
             const response = await fetch(`${API_BASE_URL}/search`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     query,
-                    config_id: selectedModel._id,
+                    model_path: selectedModel.model_path || selectedModel.id, // Handle both formats
                     max_items: 20,
                     filters: filters,
                     page: page
                 })
             });
 
-            if (!response.ok) throw new Error('Search failed');
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error || 'Search failed');
+            }
+
             const data = await response.json();
-            setSearchResults(data.results);
-            setTotalPages(data.total_pages || 1);
+            console.log('Search response:', data);
+            
+            if (data.error) {
+                throw new Error(data.error);
+            }
+
+            setSearchResponse({
+                results: data.results || [],
+                generatedResponse: data.generated_response || '',
+                searchMetadata: data.search_metadata || {}
+            });
+            
+            if (data.search_metadata && data.search_metadata.total_results) {
+                const totalResults = data.search_metadata.total_results;
+                setTotalPages(Math.ceil(totalResults / 20));
+            } else {
+                setTotalPages(1);
+            }
             setCurrentPage(page);
+            setRawResponse(data);
         } catch (err) {
-            setError(err.message);
+            console.error("Search error:", err);
+            setSearchError(err.message);
+            setSearchResponse({
+                results: [],
+                generatedResponse: '',
+                searchMetadata: {}
+            });
         } finally {
             setSearching(false);
         }
@@ -97,9 +139,15 @@ const useModelSearch = () => {
         totalPages,
         handlePageChange,
         setSearching,
-        setError ,
+        setError,
         setCurrentPage,
         setTotalPages,
+        searchQuery,
+        setSearchQuery,
+        searchError,
+        setSearchError,
+        searchResponse,
+        setSearchResponse
     };
 };
 
@@ -293,22 +341,23 @@ const SearchError = ({ error, onRetry }) => (
     </div>
 );
 
-const SearchResults = ({ results, naturalResponse, queryInfo, currentPage, totalPages, onPageChange, error, suggestion }) => {
+const SearchResults = ({ results, generatedResponse, searchMetadata, currentPage, totalPages, onPageChange, error }) => {
     if (error) {
         return <SearchError error={error} />;
     }
 
     // Display suggestion when there are no results
     const showEmptyState = results.length === 0;
+    const suggestion = searchMetadata?.suggestion || '';
     
     return (
         <div className="space-y-6">
             {/* Natural Language Response */}
-            {naturalResponse && (
+            {generatedResponse && (
                 <div className="bg-blue-50 dark:bg-blue-900/30 border border-blue-100 dark:border-blue-800 
                          rounded-lg p-4 mb-4">
                     <h3 className="text-sm font-semibold text-blue-800 dark:text-blue-300 mb-2">AI Response:</h3>
-                    <p className="text-gray-700 dark:text-gray-300">{naturalResponse}</p>
+                    <p className="text-gray-700 dark:text-gray-300">{generatedResponse}</p>
                 </div>
             )}
 
@@ -331,13 +380,22 @@ const SearchResults = ({ results, naturalResponse, queryInfo, currentPage, total
             )}
 
             {/* Query Info */}
-            {queryInfo && (
+            {searchMetadata && (
                 <div className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-                    <span>Original Query: {queryInfo.original}</span>
-                    {queryInfo.model_path && (
+                    {searchMetadata.originalQuery && (
+                        <span>Original Query: {searchMetadata.originalQuery}</span>
+                    )}
+                    {searchMetadata.expandedQuery && (
                         <>
                             <span className="mx-2">•</span>
-                            <span>Model: {queryInfo.model_path}</span>
+                            <span>Expanded: {searchMetadata.expandedQuery}</span>
+                        </>
+                    )}
+                    {searchMetadata.intent && searchMetadata.intent.category && (
+                        <>
+                            <span className="mx-2">•</span>
+                            <span>Detected Intent: {searchMetadata.intent.category} 
+                                  ({Math.round(searchMetadata.intent.confidence * 100)}% confidence)</span>
                         </>
                     )}
                 </div>
@@ -421,28 +479,24 @@ export default function ModelSearchComponent() {
         setActiveFilters,
         currentPage,
         totalPages,
-        setSearching ,
-        setError ,
-        setCurrentPage,
         handlePageChange,
+        setSearching,
+        setError,
+        setCurrentPage,
         setTotalPages,
+        searchQuery,
+        setSearchQuery,
+        searchError,
+        setSearchError,
+        searchResponse,
+        setSearchResponse
     } = useModelSearch();
 
-    const [searchQuery, setSearchQuery] = useState('');
-
-    const [searchResponse, setSearchResponse] = useState({
-        results: [],
-        naturalResponse: '',
-        queryInfo: null,
-        total: 0,
-        suggestion: ''
-    });
-
-    const [searchError, setSearchError] = useState(null);
+    const [rawResponse, setRawResponse] = useState(null);
 
     const handleSearch = async (e) => {
         e.preventDefault();
-        setSearchError(null); // Reset error state
+        setSearchError(null);
         setSearching(true);
 
         try {
@@ -463,10 +517,13 @@ export default function ModelSearchComponent() {
                 throw new Error(errorData.error || 'Search failed');
             }
 
-            // Parse response
             const data = await response.json();
+            console.log('Search response:', data);
             
-            // Extract suggestions if available
+            if (data.error) {
+                throw new Error(data.error);
+            }
+
             const suggestion = data.search_metadata?.suggestion || '';
             
             setSearchResponse({
@@ -482,8 +539,10 @@ export default function ModelSearchComponent() {
 
             setCurrentPage(1);
             setTotalPages(Math.ceil((data.total || 0) / 20));
+            setRawResponse(data);
 
         } catch (err) {
+            console.error("Search error:", err);
             setSearchError(err.message);
             setSearchResponse({
                 results: [],
@@ -569,8 +628,8 @@ export default function ModelSearchComponent() {
                             searchResponse.results.length > 0 ? (
                                 <SearchResults
                                     results={searchResponse.results}
-                                    naturalResponse={searchResponse.naturalResponse}
-                                    queryInfo={searchResponse.queryInfo}
+                                    generatedResponse={searchResponse.naturalResponse}
+                                    searchMetadata={searchResponse.queryInfo}
                                     currentPage={currentPage}
                                     totalPages={totalPages}
                                     onPageChange={handlePageChange}
@@ -585,9 +644,13 @@ export default function ModelSearchComponent() {
                                 </div>
                             )
                         )}
+                        
+                        {rawResponse && (
+                            <DebugResponse data={rawResponse} />
+                        )}
                     </div>
                 </div>
- 
+
                 {/* Filters */}
                 <div className="col-span-12 lg:col-span-3">
                     {selectedModel && selectedModel.status === 'completed' && (

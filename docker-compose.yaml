@@ -18,6 +18,7 @@ services:
       AWS_ENDPOINT_URL: http://localstack:4566
       MONGO_URI: mongodb://root:example@mongo:27017
       SEARCH_SERVICE_HOST: http://search-service:5001
+      API_PREFIX: /api  # Add this to ensure consistent API path prefixing
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
@@ -107,6 +108,7 @@ services:
       REDIS_PORT: 6379
       QDRANT_HOST: qdrant
       QDRANT_PORT: 6333
+      API_HOST: http://api:8080  # Remove /api suffix since it will be added properly
     ports:
       - "5000:5000"
     command: ["python3", "training_service.py"] 

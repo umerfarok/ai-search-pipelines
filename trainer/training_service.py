@@ -22,6 +22,7 @@ import re
 from enum import Enum
 from config import AppConfig
 from vector_store import VectorStore  
+from domain_knowledge import PRODUCT_CATEGORIES, PRODUCT_FEATURES, get_feature_terms
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -387,7 +388,7 @@ class ProductTrainer:
         self._id_cache = {}
 
     def _process_text(self, row: pd.Series, schema: Dict) -> str:
-        """Enhanced text processing with custom columns"""
+        """Enhanced text processing with domain knowledge enrichment"""
         try:
             # Process core fields
             text_parts = [
@@ -401,6 +402,25 @@ class ProductTrainer:
                 for col in schema["customcolumns"]:
                     if col.get("role") == "training" and col["name"] in row:
                         text_parts.append(str(row[col["name"]]))
+                        
+            # Determine product category and enhance with domain knowledge
+            category = str(row[schema["categorycolumn"]]) if schema.get("categorycolumn") in row else ""
+            
+            # Apply domain-specific enhancements for better search relevance
+            domain_terms = []
+            
+            # Add category-specific terms from domain knowledge
+            for category_key, terms in PRODUCT_CATEGORIES.items():
+                if category_key.lower() in category.lower() or any(term.lower() in category.lower() for term in terms):
+                    domain_terms.extend(terms)
+                    # Add feature terms for this category
+                    domain_terms.extend(get_feature_terms(category_key))
+                    break
+                    
+            # If we have domain terms, add them as enhanced context
+            if domain_terms:
+                domain_context = " ".join(domain_terms)
+                text_parts.append(f"CONTEXT: {domain_context}")
 
             return " ".join(filter(None, text_parts))
 
@@ -499,9 +519,9 @@ class ProductTrainer:
             raise
 
     def train(self, job: Dict) -> bool:
-        """Enhanced training with improved error handling and data access"""
+        """Enhanced training with domain-aware processing"""
         try:
-            logger.info(f"Starting training with job: {str(job)[:100]}...")
+            logger.info(f"Starting domain-aware training with job: {str(job)[:100]}...")
             
             # Extract config data from job structure
             if isinstance(job, dict):
@@ -569,7 +589,10 @@ class ProductTrainer:
             df = self._enhance_product_data(df, schema)
             
             # Generate better quality embeddings with domain awareness
-            model_name = config["training_config"]["embeddingmodel"]
+            model_name = config.get("training_config", {}).get("embeddingmodel", "sentence-transformers/all-MiniLM-L6-v2")
+            if not model_name:
+                model_name = "sentence-transformers/all-MiniLM-L6-v2"
+                
             expected_dim = self.embedding_manager.get_model_dimension(model_name)
             
             # Process text with improved contextual awareness
@@ -587,7 +610,6 @@ class ProductTrainer:
             embeddings = np.vstack(all_embeddings) if len(all_embeddings) > 1 else all_embeddings[0]
 
             # Create collection with enhanced metadata
-            collection_name = f"products_{model_config['id']}"
             collection_metadata = {
                 "config_id": model_config["id"],
                 "embedding_model": model_name,
@@ -604,11 +626,28 @@ class ProductTrainer:
             if not self.vector_store.create_collection(collection_name, collection_metadata):
                 raise RuntimeError("Collection setup failed")
 
-            # Process metadata with improved structure
+            # Process metadata with improved structure and domain awareness
             metadata_list = []
-            for _, row in df.iterrows():
+            processed_texts = []  # Store processed texts for storage
+            
+            for idx, row in df.iterrows():
                 try:
+                    # Enhanced metadata with original and processed text
                     metadata = self._process_metadata(row, schema, model_config["id"])
+                    
+                    # Store processed text in metadata for future reference
+                    processed_text = texts[idx]
+                    metadata["processed_text"] = processed_text
+                    processed_texts.append(processed_text)
+                    
+                    # Add additional domain-specific metadata
+                    category = str(row[schema["categorycolumn"]]) if schema.get("categorycolumn") in row else ""
+                    for category_key, terms in PRODUCT_CATEGORIES.items():
+                        if category_key.lower() in category.lower() or any(term.lower() in category.lower() for term in terms):
+                            metadata["domain_category"] = category_key
+                            metadata["domain_terms"] = terms
+                            break
+                            
                     # Ensure all text fields are properly normalized
                     for key, value in metadata.items():
                         if isinstance(value, str):
@@ -626,6 +665,12 @@ class ProductTrainer:
                 ids=[str(i) for i in range(len(metadata_list))]
             ):
                 raise RuntimeError("Vector storage failed")
+                
+            # Save processed texts for future reference
+            model_dir = f"models/{model_config['id']}"
+            os.makedirs(model_dir, exist_ok=True)
+            with open(os.path.join(model_dir, "processed_texts.json"), "w") as f:
+                json.dump(processed_texts, f)
 
             logger.info(f"Training completed successfully for config: {model_config['id']}")
             return True
@@ -656,20 +701,50 @@ class ProductTrainer:
                 cat_mask = enhanced_df[cat_col] == category
                 cat_products = enhanced_df[cat_mask]
                 
-                if "water" in category.lower() or "filter" in category.lower():
+                # Apply different enhancements based on product category
+                # Water-related products
+                if any(water_term in category.lower() for water_term in ["water", "filter", "purifier", "purification"]):
                     # Enhance water-related product descriptions
                     enhanced_df.loc[cat_mask, desc_col] = cat_products[desc_col].apply(
                         lambda x: self._enhance_text_with_keywords(
                             x, 
-                            ["clean", "purify", "filter", "portable", "drinking", "safe"]
+                            ["clean", "purify", "filter", "portable", "drinking", "safe", "survival", "contaminant", "bacteria"]
                         )
                     )
-                elif "outdoor" in category.lower() or "camping" in category.lower():
+                # Outdoor products
+                elif any(outdoor_term in category.lower() for outdoor_term in ["outdoor", "camping", "hiking", "survival"]):
                     # Enhance outdoor product descriptions
                     enhanced_df.loc[cat_mask, desc_col] = cat_products[desc_col].apply(
                         lambda x: self._enhance_text_with_keywords(
                             x, 
-                            ["portable", "durable", "lightweight", "compact", "survival"]
+                            ["portable", "durable", "lightweight", "compact", "survival", "adventure", "wilderness", "travel"]
+                        )
+                    )
+                # Kitchen products
+                elif any(kitchen_term in category.lower() for kitchen_term in ["kitchen", "cooking", "appliance"]):
+                    # Enhance kitchen product descriptions
+                    enhanced_df.loc[cat_mask, desc_col] = cat_products[desc_col].apply(
+                        lambda x: self._enhance_text_with_keywords(
+                            x, 
+                            ["cook", "food", "meal", "prepare", "kitchen", "efficient", "easy", "quick"]
+                        )
+                    )
+                # Cleaning products
+                elif any(clean_term in category.lower() for clean_term in ["clean", "sanitize", "disinfect"]):
+                    # Enhance cleaning product descriptions
+                    enhanced_df.loc[cat_mask, desc_col] = cat_products[desc_col].apply(
+                        lambda x: self._enhance_text_with_keywords(
+                            x, 
+                            ["clean", "remove", "sanitize", "disinfect", "germ", "bacteria", "stain", "dirt"]
+                        )
+                    )
+                # Pest control products
+                elif any(pest_term in category.lower() for pest_term in ["pest", "insect", "bug", "rodent"]):
+                    # Enhance pest control product descriptions
+                    enhanced_df.loc[cat_mask, desc_col] = cat_products[desc_col].apply(
+                        lambda x: self._enhance_text_with_keywords(
+                            x, 
+                            ["repel", "kill", "control", "eliminate", "prevent", "protect", "infestation", "effective"]
                         )
                     )
                     
@@ -689,22 +764,49 @@ class ProductTrainer:
         for keyword in keywords:
             if keyword not in text_lower:
                 # Check if semantically similar words are present
-                # This is a simple implementation - could be improved with word embeddings
-                if not any(similar in text_lower for similar in self._get_similar_words(keyword)):
+                similar_words = self._get_similar_words(keyword)
+                if not any(similar in text_lower for similar in similar_words):
                     enhancements.append(keyword)
                     
         if enhancements:
             # Add keywords as additional context without changing original text
-            enhanced_text = f"{text} [Related: {', '.join(enhancements)}]"
+            enhanced_text = f"{text} [RELEVANT: {', '.join(enhancements)}]"
             return enhanced_text
         
         return text
 
     def _get_similar_words(self, word):
-        """Get similar words for a given keyword"""
-        # This is a simple implementation - could be replaced with word embeddings
-        similarity_map = AppConfig.DOMAIN_KEYWORDS
-        return similarity_map.get(word, [])
+        """Get similar words for a given keyword using domain knowledge"""
+        similarity_map = {
+            "clean": ["purify", "filter", "sanitize", "disinfect"],
+            "purify": ["clean", "filter", "potable", "drinkable"],
+            "filter": ["purify", "clean", "remove", "strain"],
+            "portable": ["travel", "compact", "lightweight", "handheld"],
+            "drinking": ["potable", "drinkable", "consumption", "beverage"],
+            "safe": ["secure", "protected", "reliable", "trusted"],
+            "survival": ["emergency", "wilderness", "outdoors", "life-saving"],
+            "contaminant": ["pollutant", "impurity", "dirt", "bacteria"],
+            "bacteria": ["germ", "microbe", "pathogen", "organism"],
+            "durable": ["sturdy", "tough", "lasting", "strong"],
+            "lightweight": ["portable", "light", "easy-to-carry"],
+            "compact": ["small", "portable", "space-saving", "miniature"],
+            "adventure": ["journey", "expedition", "trip", "excursion"],
+            "wilderness": ["wild", "outdoors", "nature", "remote"],
+            "travel": ["journey", "trip", "touring", "voyage"],
+            "cook": ["prepare", "make", "bake", "grill"],
+            "food": ["meal", "dish", "cuisine", "edibles"],
+            "prepare": ["make", "create", "cook", "ready"],
+            "efficient": ["effective", "productive", "capable", "powerful"],
+            "easy": ["simple", "straightforward", "effortless", "convenient"],
+            "quick": ["fast", "rapid", "speedy", "swift"],
+            "sanitize": ["clean", "disinfect", "sterilize", "decontaminate"],
+            "repel": ["deter", "keep away", "ward off", "drive away"],
+            "kill": ["eliminate", "destroy", "exterminate", "terminate"],
+            "control": ["manage", "regulate", "monitor", "contain"],
+            "protect": ["guard", "shield", "defend", "safeguard"]
+        }
+        
+        return similarity_map.get(word, [word])
 
     def _validate_embeddings(self, embeddings: np.ndarray, model_name: str) -> bool:
         """Enhanced embedding validation"""
@@ -847,57 +949,36 @@ class TrainingWorker:
     def process_job(self, job: Dict):
         """Process a single training job"""
         try:
-            logger.info(f"Processing job for config: {job.get('config_id')}")
-            config = None
-
-            # Extract config properly from job structure
+            config_id = None
+            
+            # Extract config ID and config from job structure properly
             if isinstance(job, dict):
                 if "config" in job:
                     config = job["config"]
+                    config_id = config.get("id") 
+                elif "config_id" in job:
+                    config_id = job.get("config_id")
+                    config = job
                 elif all(k in job for k in ["id", "name", "schema_mapping"]):
                     config = job  # Job itself is the config
-
-            if not config:
-                raise ValueError("Invalid job structure - missing config")
-
+                    config_id = job.get("id")
+                    
+                # Log job content for debugging
+                logger.info(f"Processing job: {json.dumps(job)[:200]}...")
+            
+            if not config_id:
+                logger.error("Invalid job structure - missing config_id")
+                return
+                
+            logger.info(f"Processing job for config ID: {config_id}")
+            
             # Set default values for required fields
             config.setdefault("embedding_model", "sentence-transformers/all-MiniLM-L6-v2")
             config.setdefault("vector_size", 384)  # Default for all-MiniLM-L6-v2
             
-            # Set default index config if missing
-            if not config.get("index_config") or not config["index_config"].get("type"):
-                config["index_config"] = {
-                    "type": "hnsw",
-                    "distance_metric": "cosine",
-                    "hnsw_m": 16,
-                    "hnsw_ef_construction": 200,
-                    "hnsw_ef": 100
-                }
-
-            # Update the training configuration
-            config.setdefault("training_config", {})
-            config["training_config"].update({
-                "model_type": "transformer",
-                "embeddingmodel": config.get("embedding_model", "sentence-transformers/all-MiniLM-L6-v2"),
-                "batch_size": 128,
-                "max_tokens": 512,
-                "validation_split": 0.2
-            })
-
-            # Ensure data source format is set
-            if "data_source" in config and isinstance(config["data_source"], dict):
-                config["data_source"].setdefault("format", "csv")
-                if not config["data_source"].get("options"):
-                    config["data_source"]["options"] = {}
-
-            config_id = config.get("id")
-            if not config_id:
-                raise ValueError("Config ID is required")
-
-            logger.info(f"Processing config: {config_id}")
+            # Update status to PROCESSING
             self._update_status(config_id, ModelStatus.PROCESSING, progress=0)
-            self.update_api_status(config_id, ModelStatus.PROCESSING.value, progress=0)
-
+            
             # Use schema mapping directly without conversion
             success = self.trainer.train({
                 "config": config,
@@ -905,13 +986,13 @@ class TrainingWorker:
             })
 
             if success:
+                logger.info(f"Training completed successfully for config {config_id}")
                 self._update_status(config_id, ModelStatus.COMPLETED, progress=100)
-                self.update_api_status(config_id, ModelStatus.COMPLETED.value, progress=100)
             else:
+                logger.error(f"Training failed for config {config_id}")
                 self._update_status(
                     config_id, ModelStatus.FAILED, error="Training failed"
                 )
-                self.update_api_status(config_id, ModelStatus.FAILED.value, error="Training failed")
 
         except Exception as e:
             logger.error(f"Error processing job: {e}")
@@ -920,7 +1001,6 @@ class TrainingWorker:
                 self._update_status(
                     config_id, ModelStatus.FAILED, error=str(e)
                 )
-                self.update_api_status(config_id, ModelStatus.FAILED.value, error=str(e))
             else:
                 logger.error("Could not update status: invalid job structure")
 
@@ -964,23 +1044,75 @@ class TrainingWorker:
             if model_info:
                 update_data.update(model_info)
 
-            url = f"{AppConfig.API_HOST}/config/status/{config_id}"
+            # Improved URL construction to avoid duplicated path segments
+            api_host = AppConfig.API_HOST.rstrip('/')
+            
+            # Check if API_HOST already ends with 'api' path segment
+            if '/api' in api_host:
+                url = f"{api_host}/config/status/{config_id}"
+            else:
+                url = f"{api_host}/api/config/status/{config_id}"
+                
+            logger.info(f"Sending status update to API: {url}, status: {status}, progress: {progress}")
 
             for attempt in range(AppConfig.MAX_RETRIES):
                 try:
-                    response = requests.put(url, json=update_data, timeout=5)
+                    headers = {"Content-Type": "application/json"}
+                    response = requests.put(url, json=update_data, headers=headers, timeout=10)
+                    
+                    # Log response status and content for debugging
+                    logger.info(f"API response: status={response.status_code}, content={response.text[:100]}")
+                    
                     if response.status_code == 200:
+                        logger.info(f"Successfully updated status to {status} for config {config_id}")
                         return
+                    elif response.status_code == 404:
+                        # Try direct MongoDB update through a helper service or script
+                        # This is a fallback mechanism
+                        logger.warning(f"API returned 404, attempting direct database update for {config_id}")
+                        self._direct_db_update(config_id, status, progress, error)
+                        return
+                    else:
+                        logger.warning(f"Failed to update status: {response.status_code} - {response.text}")
+                        
                     if attempt < AppConfig.MAX_RETRIES - 1:
                         time.sleep(AppConfig.RETRY_DELAY * (attempt + 1))
                 except Exception as e:
+                    logger.error(f"Error updating status via API (attempt {attempt+1}): {e}")
                     if attempt == AppConfig.MAX_RETRIES - 1:
-                        logger.error(f"Error updating status via API: {e}")
+                        logger.error(f"All retries failed for status update: {e}")
                     else:
                         time.sleep(AppConfig.RETRY_DELAY * (attempt + 1))
 
         except Exception as e:
             logger.error(f"Error updating status: {e}")
+            
+    def _direct_db_update(self, config_id: str, status: str, progress: float = None, error: str = None):
+        """Direct database update fallback when API fails"""
+        try:
+            # Log the attempted direct update
+            logger.info(f"Attempting direct database update for config {config_id}")
+            
+            # Save update info to a special Redis key for later processing
+            direct_update_data = {
+                "config_id": config_id,
+                "status": status,
+                "progress": progress,
+                "error": error,
+                "timestamp": datetime.now().isoformat(),
+                "attempted_at": datetime.now().isoformat(),
+            }
+            
+            # Use a dedicated Redis key for tracking failed updates
+            direct_update_key = f"direct_update:{config_id}"
+            self.redis.set(direct_update_key, json.dumps(direct_update_data), ex=86400*3)  # 3-day expiry
+            
+            # Also append to a list of pending updates
+            self.redis.lpush("pending_status_updates", json.dumps(direct_update_data))
+            
+            logger.info(f"Saved direct update data for config {config_id} to Redis")
+        except Exception as e:
+            logger.error(f"Failed direct database update: {e}")
 
     def _update_status(
         self,
@@ -999,7 +1131,7 @@ class TrainingWorker:
             if progress is not None:
                 status_data["training_stats"] = {
                     "progress": progress,
-                    "processed_records": 0,
+                    "processed_records": 0, 
                     "total_records": 0,
                     "start_time": datetime.now().isoformat() if progress == 0 else None,
                     "end_time": datetime.now().isoformat() if progress == 100 else None,
@@ -1009,6 +1141,11 @@ class TrainingWorker:
 
             key = f"{AppConfig.MODEL_STATUS_PREFIX}{config_id}"
             self.redis.set(key, json.dumps(status_data), ex=86400)  # 24 hour expiry
+            
+            # Log the status update
+            logger.info(f"Updating status for config {config_id} to {status.value} in Redis")
+            
+            # Make sure to update API status too
             self.update_api_status(config_id, status.value, progress, error)
 
         except Exception as e:
