@@ -2,3 +2,4 @@ data
 models
 node_modules
 trainer/venv
+mongodb_data

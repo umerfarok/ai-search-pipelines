@@ -1,56 +1,78 @@
 #!/bin/bash
+set -e  # Exit immediately if a command exits with a non-zero status
 
-set -e  # Exit on error
-
+echo "=========================="
 echo "Updating system packages..."
-sudo apt update && sudo apt upgrade -y
-
-# Install Node.js (Latest LTS)
-echo "Installing Node.js..."
-curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
-sudo apt install -y nodejs
-node -v
-npm -v
-
-# Install Docker
-echo "Installing Docker..."
-sudo apt install -y ca-certificates curl gnupg
-sudo mkdir -p /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo tee /etc/apt/keyrings/docker.asc > /dev/null
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+echo "=========================="
 sudo apt update
-sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
-# Enable and start Docker service
-sudo systemctl enable docker
-sudo systemctl start docker
+########################################
+# 1. Install Node.js 20+
+########################################
+echo ""
+echo "========================================"
+echo "Installing Node.js 20+ via NodeSource..."
+echo "========================================"
+# Download and run the Node.js 20.x setup script from NodeSource
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+# Install Node.js (includes npm)
+sudo apt install -y nodejs
 
-# Install NVIDIA Container Toolkit
-echo "Installing NVIDIA Docker runtime..."
+
+
+echo ""
+echo "========================================"
+echo "Installing Docker Compose..."
+echo "========================================"
+sudo curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+sudo chmod +x /usr/local/bin/docker-compose
+echo "Docker Compose version: $(docker-compose --version)"
+
+
+########################################
+# 3. Install NVIDIA Container Toolkit
+########################################
+echo ""
+echo "========================================"
+echo "Setting up NVIDIA Container Toolkit..."
+echo "========================================"
+
+# Add the NVIDIA package repositories
+distribution=$(. /etc/os-release; echo $ID$VERSION_ID)
+# Import the GPG key
+curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | sudo apt-key add -
+# Add the repository to APT sources
+curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | sudo tee /etc/apt/sources.list.d/nvidia-docker.list
+
+# Update apt package list and install the NVIDIA container toolkit
+sudo apt update
 sudo apt install -y nvidia-container-toolkit
-sudo nvidia-ctk runtime configure --runtime=docker
+
+# Configure Docker to use the NVIDIA runtime
+echo ""
+echo "Configuring Docker to use the NVIDIA runtime..."
+sudo tee /etc/docker/daemon.json > /dev/null <<EOF
+{
+    "runtimes": {
+        "nvidia": {
+            "path": "nvidia-container-runtime",
+            "runtimeArgs": []
+        }
+    }
+}
+EOF
+
+# Restart Docker to apply the changes
 sudo systemctl restart docker
 
-# Verify NVIDIA Docker installation
-echo "Testing NVIDIA Docker..."
-docker run --rm --gpus all nvidia/cuda:12.2.0-base-ubuntu22.04 nvidia-smi
+########################################
+# 4. Final Verification
+########################################
+echo ""
+echo "========================================"
+echo "Verifying NVIDIA GPU support in Docker..."
+echo "========================================"
+docker run --rm --gpus all nvidia/cuda:12.2.0-base nvidia-smi
 
-# Install Docker Compose (latest version)
-echo "Installing Docker Compose..."
-mkdir -p ~/.docker/cli-plugins
-curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m) -o ~/.docker/cli-plugins/docker-compose
-chmod +x ~/.docker/cli-plugins/docker-compose
-
-# Clone AI Search Pipelines Repository
-echo "Cloning AI Search Pipelines repository..."
-git clone https://github.com/umerfarok/ai-search-pipelines.git
-
-# Verify installations
-echo "Installed versions:"
-node -v
-npm -v
-docker --version
-docker compose version
-nvidia-smi
-
-echo "✅ All tools installed successfully!"
+echo ""
+echo "Setup complete!"

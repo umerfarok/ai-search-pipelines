@@ -134,39 +134,24 @@ func (s *ConfigService) CreateConfig(c *gin.Context) {
 	}
 
 	// Initialize configuration metadata
-	config.ID = primitive.NewObjectID()
-	timeNow := time.Now().UTC().Format(time.RFC3339)
+	config.ID = primitive.NewObjectID().Hex() // Convert ObjectID to string
+	timeNow := time.Now().UTC()
 	config.CreatedAt = timeNow
 	config.UpdatedAt = timeNow
 	config.Status = string(cfg.ModelStatusPending)
-	config.Version = time.Now().Format("20060102150405")
 
-	// Set model path based on ID and version
-	config.ModelPath = fmt.Sprintf("models/%s", config.ID.Hex())
-
-	// Handle append mode
-	if config.Mode == "append" && config.PreviousVersion != "" {
-		if err := s.validatePreviousVersion(config.PreviousVersion); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-	}
+	// Set model path based on ID
+	config.ModelPath = fmt.Sprintf("models/%s", config.ID)
 
 	// Upload file to S3
-	s3Key := path.Join("data", config.ID.Hex(), header.Filename)
+	s3Key := path.Join("data", config.ID, header.Filename)
 	if err := s.uploadFileToS3(file, s3Key); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to upload file: %v", err)})
 		return
 	}
 
-	// Update config with file location
-	config.DataSource.Location = s3Key
-
-	// Initialize training stats
-	config.TrainingStats = &cfg.TrainingStats{
-		StartTime: timeNow,
-		Progress:  0,
-	}
+	// Update config with file location using DataSourceConfig instead of DataSource
+	config.DataSourceConfig.Location = s3Key
 
 	// Save config to MongoDB
 	if err := s.saveConfig(&config); err != nil {
@@ -183,48 +168,67 @@ func (s *ConfigService) CreateConfig(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{
 		"status": "success",
 		"data": gin.H{
-			"config_id":  config.ID.Hex(),
-			"version":    config.Version,
+			"config_id":  config.ID,
 			"model_path": config.ModelPath,
 		},
 	})
 }
 
 func (s *ConfigService) GetConfig(c *gin.Context) {
-	id, err := primitive.ObjectIDFromHex(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id format"})
-		return
+	id := c.Param("id")
+	log.Printf("Get config request for ID: %s", id)
+
+	// First try to parse as ObjectID
+	objID, err := primitive.ObjectIDFromHex(id)
+	if err == nil {
+		// Valid ObjectID, try to find by _id
+		var config cfg.ModelConfig
+		err = s.db.Collection("configs").FindOne(
+			context.Background(),
+			bson.M{"_id": objID},
+		).Decode(&config)
+
+		if err == nil {
+			c.JSON(http.StatusOK, config)
+			return
+		}
 	}
 
+	// If not found by ObjectID or not a valid ObjectID, try by string ID
+	log.Printf("ID %s not found as ObjectID or not valid, trying as string ID", id)
+
+	// Try to find by string ID field
 	var config cfg.ModelConfig
 	err = s.db.Collection("configs").FindOne(
 		context.Background(),
-		bson.M{"_id": id},
+		bson.D{
+			{Key: "$or", Value: bson.A{
+				bson.M{"id": id},
+				bson.M{"_id": id},
+			}},
+		},
 	).Decode(&config)
 
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
+			log.Printf("Config with ID %s not found in any field", id)
 			c.JSON(http.StatusNotFound, gin.H{"error": "configuration not found"})
 			return
 		}
+		log.Printf("Database error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
+	log.Printf("Successfully found config for ID %s", id)
 	c.JSON(http.StatusOK, config)
 }
 
 func (s *ConfigService) ListConfigs(c *gin.Context) {
 	filter := bson.M{}
-
 	// Add filters
 	if status := c.Query("status"); status != "" {
 		filter["status"] = status
-	}
-
-	if mode := c.Query("mode"); mode != "" {
-		filter["mode"] = mode
 	}
 
 	// Add pagination
@@ -234,7 +238,6 @@ func (s *ConfigService) ListConfigs(c *gin.Context) {
 			limit = val
 		}
 	}
-
 	skip := 0
 	if page := c.Query("page"); page != "" {
 		if val, err := strconv.Atoi(page); err == nil {
@@ -282,6 +285,8 @@ func (s *ConfigService) UpdateConfigStatus(c *gin.Context) {
 		return
 	}
 
+	log.Printf("Received status update for config ID: %s", configID)
+
 	var updateReq struct {
 		Status    string  `json:"status" binding:"required"`
 		Error     string  `json:"error,omitempty"`
@@ -302,45 +307,96 @@ func (s *ConfigService) UpdateConfigStatus(c *gin.Context) {
 		"progress":   updateReq.Progress,
 		"updated_at": updateReq.UpdatedAt,
 	}
-
 	statusBytes, _ := json.Marshal(status)
 	if err := s.redisClient.Set(context.Background(), statusKey, statusBytes, 24*time.Hour).Err(); err != nil {
 		log.Printf("Warning: Failed to update Redis status: %v", err)
 	}
 
-	// Update MongoDB
+	// Try multiple options to find the config record
+	var updated bool = false
+	var updateErr error = nil
+
+	// Try updating by ObjectID first if valid
 	objID, err := primitive.ObjectIDFromHex(configID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid config id"})
+	if err == nil {
+		// Valid ObjectID format - try to update by _id field
+		result, err := s.updateConfigByField("_id", objID, updateReq)
+		if err == nil && result.MatchedCount > 0 {
+			updated = true
+			log.Printf("Updated config with ObjectID: %s", configID)
+		} else {
+			updateErr = err
+			log.Printf("Failed to update by ObjectID: %v", err)
+		}
+	}
+
+	// If not updated by ObjectID, try by string ID field
+	if !updated {
+		result, err := s.updateConfigByField("id", configID, updateReq)
+		if err == nil && result.MatchedCount > 0 {
+			updated = true
+			log.Printf("Updated config with string ID: %s", configID)
+		} else {
+			updateErr = err
+			log.Printf("Failed to update by string ID: %v", err)
+		}
+	} 
+
+	// Try with the raw ID as string (exactly as provided)
+	if !updated {
+		result, err := s.updateConfigByField("_id", configID, updateReq)
+		if err == nil && result.MatchedCount > 0 {
+			updated = true
+			log.Printf("Updated config with raw ID: %s", configID)
+		} else {
+			updateErr = err
+			log.Printf("Failed to update by raw ID: %v", err)
+		}
+	}
+
+	// Return appropriate response
+	if updated {
+		log.Printf("Successfully updated status for config %s to %s", configID, updateReq.Status)
+		c.JSON(http.StatusOK, gin.H{"status": "updated"})
 		return
 	}
 
+	// Log all failed attempts and return error
+	log.Printf("All update attempts for config %s failed: %v", configID, updateErr)
+	c.JSON(http.StatusNotFound, gin.H{"error": "config not found"})
+}
+
+// Helper method to update config by a specific field
+func (s *ConfigService) updateConfigByField(fieldName string, fieldValue interface{}, updateReq struct {
+	Status    string  `json:"status" binding:"required"`
+	Error     string  `json:"error,omitempty"`
+	Progress  float64 `json:"progress,omitempty"`
+	UpdatedAt string  `json:"updated_at"`
+}) (*mongo.UpdateResult, error) {
+	// Prepare update document
 	update := bson.M{
 		"$set": bson.M{
-			"status":                  updateReq.Status,
-			"error":                   updateReq.Error,
-			"updated_at":              updateReq.UpdatedAt,
-			"training_stats.progress": updateReq.Progress,
+			"status": updateReq.Status,
+			"error":  updateReq.Error,
+			"updated_at": func() time.Time {
+				t, err := time.Parse(time.RFC3339, updateReq.UpdatedAt)
+				if err != nil {
+					return time.Now().UTC()
+				}
+				return t
+			}(),
 		},
 	}
 
+	// Execute update
+	log.Printf("Attempting to update config with %s = %v", fieldName, fieldValue)
 	result, err := s.db.Collection("configs").UpdateOne(
 		context.Background(),
-		bson.M{"_id": objID},
+		bson.M{fieldName: fieldValue},
 		update,
 	)
 
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update config"})
-		return
-	}
-
-	if result.MatchedCount == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "config not found"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"status": "updated"})
+	return result, err
 }
 
 func (s *ConfigService) validatePreviousVersion(previousVersion string) error {
@@ -375,7 +431,7 @@ func (s *ConfigService) saveConfig(config *cfg.ModelConfig) error {
 
 func (s *ConfigService) queueTrainingJob(config *cfg.ModelConfig) error {
 	job := cfg.QueuedJob{
-		ConfigID:  config.ID.Hex(),
+		ConfigID:  config.ID,
 		Config:    *config,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	}
@@ -392,38 +448,23 @@ func validateConfig(config *cfg.ModelConfig) error {
 	if config.Name == "" {
 		return fmt.Errorf("name is required")
 	}
-
-	if config.DataSource.Type == "" {
+	if config.DataSourceConfig.Type == "" {
 		return fmt.Errorf("data_source.type is required")
 	}
 
-	if config.Mode != "replace" && config.Mode != "append" {
-		return fmt.Errorf("mode must be either 'replace' or 'append'")
+	// Update schema validation to use correct field names
+	schema := config.SchemaMapping
+	if schema.NameColumn == "" { // Updated from TitleField
+		return fmt.Errorf("schema_mapping.namecolumn is required")
 	}
-
-	if config.Mode == "append" && config.PreviousVersion == "" {
-		return fmt.Errorf("previous_version is required for append mode")
+	if schema.IDColumn == "" { // Updated from IDField
+		return fmt.Errorf("schema_mapping.idcolumn is required")
 	}
-
-	if config.SchemaMapping.NameColumn == "" {
-		return fmt.Errorf("schema_mapping.name_column is required")
+	if schema.DescriptionColumn == "" {
+		return fmt.Errorf("schema_mapping.descriptioncolumn is required")
 	}
-
-	if config.SchemaMapping.IDColumn == "" {
-		return fmt.Errorf("schema_mapping.id_column is required")
-	}
-
-	// Set default values
-	if config.TrainingConfig.BatchSize == 0 {
-		config.TrainingConfig.BatchSize = 128
-	}
-
-	if config.TrainingConfig.MaxTokens == 0 {
-		config.TrainingConfig.MaxTokens = 512
-	}
-
-	if config.TrainingConfig.ValidationSplit == 0 {
-		config.TrainingConfig.ValidationSplit = 0.2
+	if schema.CategoryColumn == "" {
+		return fmt.Errorf("schema_mapping.categorycolumn is required")
 	}
 
 	return nil
@@ -459,7 +500,6 @@ func (s *ConfigService) GetTrainingStatus(c *gin.Context) {
 		context.Background(),
 		bson.M{"_id": id},
 	).Decode(&config)
-
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
 			c.JSON(http.StatusNotFound, gin.H{"error": "config not found"})
@@ -471,11 +511,9 @@ func (s *ConfigService) GetTrainingStatus(c *gin.Context) {
 
 	// Return status response
 	c.JSON(http.StatusOK, gin.H{
-		"status":         config.Status,
-		"error":          config.Error,
-		"progress":       config.TrainingStats.Progress,
-		"updated_at":     config.UpdatedAt,
-		"training_stats": config.TrainingStats,
+		"status":     config.Status,
+		"error":      config.Status == string(cfg.ModelStatusFailed),
+		"updated_at": config.UpdatedAt,
 	})
 }
 
@@ -485,9 +523,8 @@ func (s *ConfigService) GetQueuedJobs(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to get queue length: %v", err)})
 		return
 	}
- 
 	if queueLen == 0 {
-		c.JSON(http.StatusOK, gin.H{ 
+		c.JSON(http.StatusOK, gin.H{
 			"count": 0,
 			"jobs":  []interface{}{},
 		})
@@ -521,23 +558,19 @@ func (s *ConfigService) uploadFileToS3(file multipart.File, key string) error {
 	if err != nil {
 		return fmt.Errorf("failed to read file: %v", err)
 	}
-
 	_, err = file.Seek(0, 0)
 	if err != nil {
 		return fmt.Errorf("failed to reset file pointer: %v", err)
 	}
-
 	_, err = s.s3Client.PutObject(context.TODO(), &s3.PutObjectInput{
 		Bucket:      aws.String(s.s3Bucket),
 		Key:         aws.String(key),
 		Body:        bytes.NewReader(content),
 		ContentType: aws.String("text/csv"),
 	})
-
 	if err != nil {
 		return fmt.Errorf("failed to upload to S3: %v", err)
 	}
-
 	return nil
 }
 
@@ -545,6 +578,7 @@ func isValidCSVFile(header *multipart.FileHeader) bool {
 	ext := path.Ext(header.Filename)
 	return ext == ".csv"
 }
+
 func (s *ConfigService) GetAvailableLLMModels(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"models": cfg.AvailableLLMModels,

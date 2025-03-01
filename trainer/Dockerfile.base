@@ -1,40 +1,47 @@
-FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu20.04
+FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04
 
-# Set environment variables
-ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONUNBUFFERED=1 \
-    PATH="/usr/local/bin:$PATH"
-
-# Install Python 3.10 and dependencies
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        software-properties-common \
-        && add-apt-repository -y ppa:deadsnakes/ppa \
-        && apt-get update \
-        && apt-get install -y --no-install-recommends \
-        python3.10 \
-        python3.10-distutils \
-        python3.10-dev \
-        python3-pip \
-        curl \
-        build-essential \
-        gcc \
-        g++ \
-    && curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10 \
-    && ln -sf /usr/bin/python3.10 /usr/local/bin/python3 \
-    && ln -sf /usr/bin/python3.10 /usr/local/bin/python \
-    && apt-get clean \
+# Install system dependencies including Python
+RUN apt-get update && apt-get install -y \
+    python3.10 \
+    python3.10-venv \
+    python3-pip \
+    python3.10-dev \
+    python-is-python3 \
+    git \
+    build-essential \
+    wget \
+    software-properties-common \
+    && apt-get install -y sqlite3 libsqlite3-dev \
+    && ln -sf /usr/bin/python3.10 /usr/bin/python3 \
+    && ln -sf /usr/bin/python3 /usr/bin/python \
     && rm -rf /var/lib/apt/lists/*
 
-# Install core ML dependencies
-COPY requirements.base.txt /tmp/requirements.base.txt
-RUN pip3 install --no-cache-dir -r /tmp/requirements.base.txt \
-    && rm /tmp/requirements.base.txt
+# Verify Python installation
+RUN python --version && pip3 --version
 
-# Set cuda environment variables
-ENV CUDA_HOME=/usr/local/cuda
-ENV PATH=${CUDA_HOME}/bin:${PATH}
-ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+# Verify SQLite3 version
+RUN sqlite3 --version
+
+# Configure environment
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/usr/local/bin:$PATH" \
+    LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH"
 
 WORKDIR /app
- 
+
+# Copy and install base requirements
+COPY requirements.base.txt . 
+RUN pip3 install --no-cache-dir -r requirements.base.txt
+
+# Create cache directories
+RUN mkdir -p /app/cache/{transformers,huggingface,torch,nltk_data,models}
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    TRANSFORMERS_CACHE=/app/cache/transformers \
+    HF_HOME=/app/cache/huggingface \
+    TORCH_HOME=/app/cache/torch \
+    XDG_CACHE_HOME=/app/cache
+
+

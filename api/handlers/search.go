@@ -2,236 +2,160 @@ package handlers
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/umerfarok/product-search/config"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 type SearchService struct {
-	db          *mongo.Database
-	searchHost  string
-	cache       sync.Map
-	healthCheck chan struct{}
+	db     *mongo.Database
+	client *http.Client
 }
 
 func NewSearchService(db *mongo.Database) *SearchService {
-	searchHost := os.Getenv("SEARCH_SERVICE_HOST")
-	if searchHost == "" {
-		searchHost = "http://localhost:5001"
+	return &SearchService{
+		db: db,
+		client: &http.Client{
+			Timeout: time.Second * 60,
+		},
 	}
-
-	s := &SearchService{
-		db:          db,
-		searchHost:  searchHost,
-		healthCheck: make(chan struct{}),
-	}
-
-	// Start health check routine
-	go s.startHealthCheck()
-
-	return s
-}
-
-func (s *SearchService) startHealthCheck() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			s.checkHealth()
-		case <-s.healthCheck:
-			return
-		}
-	}
-}
-
-func (s *SearchService) checkHealth() {
-	resp, err := http.Get(fmt.Sprintf("%s/health", s.searchHost))
-	if err != nil || resp.StatusCode != http.StatusOK {
-		log.Printf("Search service health check failed: %v", err)
-		return
-	}
-	defer resp.Body.Close()
-}
-
-type SearchResult struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Description string            `json:"description"`
-	Category    string            `json:"category"`
-	Score       float64           `json:"score"`
-	Metadata    map[string]string `json:"metadata"`
-}
-
-type SearchResponse struct {
-	Results         []SearchResult `json:"results"`
-	Total           int            `json:"total"`
-	NaturalResponse string         `json:"natural_response"`
-	QueryInfo       QueryInfo      `json:"query_info"`
-}
-
-type QueryInfo struct {
-	Original  string `json:"original"`
-	ModelPath string `json:"model_path"`
 }
 
 func (s *SearchService) Search(c *gin.Context) {
-	var req struct {
-		Query     string                 `json:"query"`
-		ModelPath string                 `json:"model_path"`
+	var searchReq struct {
+		Query     string                 `json:"query" binding:"required"`
+		ModelPath string                 `json:"model_path" binding:"required"`
 		MaxItems  int                    `json:"max_items"`
-		Filters   map[string]interface{} `json:"filters,omitempty"`
+		Filters   map[string]interface{} `json:"filters"`
+		Page      int                    `json:"page"`
 	}
 
-	if err := c.BindJSON(&req); err != nil {
+	if err := c.ShouldBindJSON(&searchReq); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Set default max items
-	if req.MaxItems == 0 {
-		req.MaxItems = 10
+	// Default values
+	if searchReq.MaxItems <= 0 {
+		searchReq.MaxItems = 20
+	}
+	if searchReq.Page <= 0 {
+		searchReq.Page = 1
 	}
 
-	// If Query or ModelPath is empty, get the latest completed model
-	if req.Query == "" || req.ModelPath == "" {
-		modelConfig, err := s.getModelConfig("latest")
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to get latest model config: %v", err)})
-			return
-		}
-		req.ModelPath = modelConfig.ModelPath
+	// Prepare request to search service
+	searchServiceHost := os.Getenv("SEARCH_SERVICE_HOST")
+	if searchServiceHost == "" {
+		searchServiceHost = "http://search-service:5001"
 	}
+
+	searchServiceURL := fmt.Sprintf("%s/search", searchServiceHost)
 
 	// Forward request to search service
-	jsonBody, err := json.Marshal(req)
+	requestBody, err := json.Marshal(map[string]interface{}{
+		"query":      searchReq.Query,
+		"model_path": searchReq.ModelPath,
+		"max_items":  searchReq.MaxItems,
+		"filters":    searchReq.Filters,
+		"page":       searchReq.Page,
+	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to marshal request: %v", err)})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal search request"})
 		return
 	}
 
-	// Call Python search service
-	resp, err := http.Post(
-		fmt.Sprintf("%s/search", s.searchHost),
-		"application/json",
-		bytes.NewBuffer(jsonBody),
-	)
+	// Add more debug information
+	log.Printf("Sending search request to: %s, Data: %s", searchServiceURL, string(requestBody))
+
+	resp, err := s.client.Post(searchServiceURL, "application/json", bytes.NewBuffer(requestBody))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("search service error: %v", err)})
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":  fmt.Sprintf("Failed to call search service: %v", err),
+			"status": "failed",
+		})
 		return
 	}
 	defer resp.Body.Close()
 
+	// Read and parse response
+	responseBody, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":  "Failed to read search response",
+			"status": "failed",
+		})
+		return
+	}
+
+	// Add debug logging to check response structure
+	log.Printf("Raw search response (first 500 chars): %s", string(responseBody)[:min(500, len(responseBody))])
+
+	// If the response status code is not 200, return the error
 	if resp.StatusCode != http.StatusOK {
-		var errorResp struct {
-			Error string `json:"error"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&errorResp); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "unknown search service error"})
+		var errorResp map[string]interface{}
+		if err := json.Unmarshal(responseBody, &errorResp); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":  fmt.Sprintf("Search service error: %s", string(responseBody)),
+				"status": "failed",
+			})
 			return
 		}
-		c.JSON(resp.StatusCode, gin.H{"error": errorResp.Error})
+		c.JSON(resp.StatusCode, errorResp)
 		return
 	}
 
-	// Decode response from Python service
-	var searchResp SearchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&searchResp); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to decode response: %v", err)})
+	// First try parsing as raw JSON to preserve all fields
+	var rawResponse map[string]interface{}
+	if err := json.Unmarshal(responseBody, &rawResponse); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":      "Failed to parse search response",
+			"status":     "failed",
+			"debug_info": string(responseBody[:min(200, len(responseBody))]),
+		})
 		return
 	}
 
-	c.JSON(http.StatusOK, searchResp)
+	// Send the complete response structure directly without trying to fit it into our struct
+	// This ensures all fields from Python are passed through
+	c.JSON(http.StatusOK, rawResponse)
 }
 
-func (s *SearchService) getModelConfig(configID string) (*config.ModelConfig, error) {
-	var modelConfig config.ModelConfig
-
-	if configID == "latest" {
-		// Get the latest completed model
-		opts := options.FindOne().SetSort(bson.D{{Key: "created_at", Value: -1}})
-		err := s.db.Collection("configs").FindOne(
-			context.Background(),
-			bson.M{"status": string(config.ModelStatusCompleted)},
-			opts,
-		).Decode(&modelConfig)
-		if err != nil {
-			return nil, fmt.Errorf("no completed models found")
-		}
-	} else {
-		// Get specific model by ID
-		objID, err := primitive.ObjectIDFromHex(configID)
-		if err != nil {
-			return nil, fmt.Errorf("invalid config ID format")
-		}
-
-		err = s.db.Collection("configs").FindOne(
-			context.Background(),
-			bson.M{"_id": objID},
-		).Decode(&modelConfig)
-		if err != nil {
-			return nil, fmt.Errorf("model config not found")
-		}
+// Helper function to get minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
 	}
-
-	return &modelConfig, nil
-}
-
-func (s *SearchService) performSearch(req interface{}, modelConfig *config.ModelConfig) (*config.SearchResponse, error) {
-	if modelConfig.ModelPath == "" {
-		return nil, fmt.Errorf("model path not configured")
-	}
-
-	jsonBody, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %v", err)
-	}
-
-	// Perform the search request
-	resp, err := http.Post(
-		fmt.Sprintf("%s/search", s.searchHost),
-		"application/json",
-		bytes.NewBuffer(jsonBody),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to call search service: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		var errorResponse struct {
-			Error string `json:"error"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&errorResponse); err != nil {
-			return nil, fmt.Errorf("search service error (status %d)", resp.StatusCode)
-		}
-		return nil, fmt.Errorf("search service error: %s", errorResponse.Error)
-	}
-
-	var searchResp config.SearchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&searchResp); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %v", err)
-	}
-
-	// Add config info to response
-	searchResp.ConfigInfo = *modelConfig
-
-	return &searchResp, nil
+	return b
 }
 
 func (s *SearchService) Close() {
-	close(s.healthCheck)
+	// Any cleanup needed
+}
+
+func (s *SearchService) HealthCheck() bool {
+	searchServiceHost := os.Getenv("SEARCH_SERVICE_HOST")
+	if searchServiceHost == "" {
+		searchServiceHost = "http://search-service:5001"
+	}
+
+	healthCheckURL := fmt.Sprintf("%s/health", searchServiceHost)
+	log.Printf("Checking search service health at: %s", healthCheckURL)
+	resp, err := s.client.Get(healthCheckURL)
+	if err != nil {
+		log.Printf("Search service health check failed: %v", err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	body, _ := ioutil.ReadAll(resp.Body)
+	log.Printf("Health check response: %s", string(body))
+
+	return resp.StatusCode == http.StatusOK
 }
