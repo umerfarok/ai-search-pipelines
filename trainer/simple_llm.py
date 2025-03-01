@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 class EnhancedLLMManager:
     """Enhanced LLM manager with better response generation and fallback options"""
-    
+     
     def __init__(self):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model_name = "gpt2"  # Default to GPT-2 for wide compatibility

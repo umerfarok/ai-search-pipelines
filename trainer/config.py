@@ -269,7 +269,7 @@ class AppConfig:
     CONFIG_BUCKET = os.getenv("CONFIG_BUCKET", "")
     
     # Vector DB configuration
-    QDRANT_HOST = os.getenv("QDRANT_HOST", "qdrant")  # Changed from 'localhost' to 'qdrant'
+    QDRANT_HOST = os.getenv("QDRANT_HOST", "qdrant")
     QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
     QDRANT_GRPC_PORT = int(os.getenv("QDRANT_GRPC_PORT", "6334"))
     QDRANT_PREFER_GRPC = True

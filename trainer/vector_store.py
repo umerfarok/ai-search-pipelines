@@ -413,7 +413,7 @@ class VectorStore:
                 info["count"] = collection.count()
                 info["exists"] = True
             
-            return info
+            return info 
         except Exception as e:
             logger.error(f"Failed to get collection info: {e}")
             return {"name": collection_name or self.collection_name, "error": str(e)}

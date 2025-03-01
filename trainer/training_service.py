@@ -318,7 +318,7 @@ class EmbeddingManager:
                     self.embedding_models[model_path] = model
                     logger.info(f"Successfully loaded model: {model_path}")
                 return self.embedding_models[model_path]
-
+ 
         except Exception as e:
             logger.error(f"Failed to load model {model_path}: {str(e)}")
             raise RuntimeError(f"Model loading failed: {model_path}") from e

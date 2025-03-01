@@ -9,31 +9,25 @@ import numpy as np
 from sentence_transformers import SentenceTransformer, CrossEncoder, util
 from flask import Flask, request, jsonify
 import requests
-import re
+import spacy
 from threading import Thread
 from queue import Queue
 import contextlib
 import torch.cuda
 from cachetools import TTLCache
 from transformers import (
-    pipeline,
     AutoModelForCausalLM,
     AutoTokenizer,
-    TextIteratorStreamer,
-    BitsAndBytesConfig,
     AutoModelForSequenceClassification,
 )
-import json
 import time
 import faiss
 from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
-import spacy
 import nltk
 from nltk.corpus import wordnet
 from collections import Counter
 
 from vector_store import VectorStore
-from simple_cache import TimedCache
 from config import AppConfig
 
 # Ensure NLTK resources are available
@@ -52,7 +46,6 @@ logger.setLevel(logging.INFO)
 app = Flask(__name__)
 
 import re
-from nltk.tokenize import word_tokenize
 from domain_knowledge import (
     PRODUCT_CATEGORIES, 
     PRODUCT_FEATURES,
@@ -1108,7 +1101,7 @@ class OptimizedSearchService:
                 suggestion = "Try searching for 'pest control', 'insect repellent', or 'mouse trap'."
             else:
                 suggestion = f"Try searching for other {category} products with more general terms."
-                
+                 
         # Add some variety to suggestions based on query length
         if len(query.split()) > 4:
             suggestion += " You might also try a shorter, more specific query."
@@ -1116,7 +1109,7 @@ class OptimizedSearchService:
             suggestion += " You could also try adding more specific details to your search."
             
         return suggestion
-            
+             
     def _compute_semantic_similarity(self, query: str, texts: List[str], model_name: str) -> List[float]:
         """Compute semantic similarity between query and texts using embeddings"""
         try:
