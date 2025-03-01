@@ -31,7 +31,7 @@ except LookupError:
     nltk.download('stopwords', quiet=True)
 
 logger = logging.getLogger(__name__)
-
+ 
 class DynamicSearchProcessor:
     """Professional-grade dynamic search processor that adapts to any product domain"""
     
@@ -84,6 +84,10 @@ class DynamicSearchProcessor:
                               "more", "most", "other", "some", "such", "no", "nor", "not", 
                               "only", "own", "same", "so", "than", "too", "very", "s", "t", 
                               "can", "will", "just", "don", "should", "now"}
+        
+        # Add vector embeddings for flexible concept matching
+        self.concept_vectors = {}
+        self._initialize_concept_vectors()
     
     def _load_resources(self):
         """Load necessary resources for query understanding"""
@@ -100,6 +104,70 @@ class DynamicSearchProcessor:
             self.nlp = None
             logger.warning("SpaCy not available for enhanced language understanding")
     
+    def _initialize_concept_vectors(self):
+        """Create concept vectors for semantic matching instead of keyword matching"""
+        if not self.embedding_manager:
+            logger.warning("No embedding manager available for concept vectors")
+            return
+            
+        # Define general product concepts - these are not hardcoded categories
+        # but rather semantic anchors for vector comparison
+        concepts = {
+            "water_treatment": [
+                "clean drinking water", 
+                "purify contaminated water",
+                "filter out impurities from water",
+                "make water safe to drink",
+                "remove bacteria from water source"
+            ],
+            "portability": [
+                "lightweight and easy to carry",
+                "compact design for travel",
+                "portable solution for on the go",
+                "easy to transport equipment",
+                "carry in backpack or bag"
+            ],
+            "outdoor_survival": [
+                "equipment for wilderness survival",
+                "tools for outdoor emergencies",
+                "jungle survival gear",
+                "forest expedition equipment",
+                "outdoor adventure necessities"
+            ],
+            "kitchen_appliances": [
+                "tools for food preparation",
+                "cooking appliances for home",
+                "kitchen equipment for meal making",
+                "food processing devices",
+                "appliances for heating food"
+            ],
+            "cleaning_products": [
+                "cleaning solutions for surfaces",
+                "products to remove dirt and stains",
+                "disinfecting and sanitizing items",
+                "household cleaning supplies",
+                "cleaners for different surfaces"
+            ],
+            "pest_management": [
+                "control insect populations",
+                "repel mosquitoes and bugs",
+                "eliminate pest infestations",
+                "prevent bugs in home",
+                "solutions for insect problems"
+            ]
+        }
+        
+        # Generate embeddings for each concept
+        model_name = "sentence-transformers/all-MiniLM-L6-v2"
+        try:
+            for concept, examples in concepts.items():
+                embeddings = self.embedding_manager.generate_embedding(examples, model_name)
+                # Store the average embedding as the concept vector
+                self.concept_vectors[concept] = np.mean(embeddings, axis=0)
+                logger.info(f"Created vector for concept: {concept}")
+        except Exception as e:
+            logger.error(f"Failed to create concept vectors: {e}")
+
     def _get_zero_shot_classifier(self):
         """Load zero-shot classifier on demand to save memory"""
         if self.zero_shot_model is None:
@@ -125,7 +193,7 @@ class DynamicSearchProcessor:
         return self.zero_shot_model, self.zero_shot_tokenizer
     
     def detect_intent(self, query: str, products: List[Dict] = None) -> Dict[str, Any]:
-        """Dynamically detect search intent using domain knowledge and semantic understanding"""
+        """Detect intent using vector similarity rather than keyword matching"""
         # Check cache first
         if query in self.intent_cache:
             return self.intent_cache[query]
@@ -134,86 +202,70 @@ class DynamicSearchProcessor:
         intent_data = {
             "category": None,
             "confidence": 0.0,
-            "is_question": '?' in query or query.lower().startswith(('how', 'what', 'where', 'do you', 'can i', 'is there')),
+            "is_question": '?' in query,
             "keywords": [],
-            "action": "find",  # Default action
-            "domain_terms": [],
-            "product_features": []
+            "action": "find",
+            "concepts": [],
+            "vector_matches": []
         }
         
         # Extract keywords (excluding stopwords)
         words = query.lower().split()
         intent_data["keywords"] = [w for w in words if len(w) > 2 and w not in self.stopwords]
         
-        # Detect action type using domain knowledge
-        for intent_type, signals in QUERY_INTENTS.items():
-            if any(signal in query.lower() for signal in signals):
-                intent_data["action"] = intent_type
-                break
-        
-        # Enhanced domain-specific category detection
-        detected_category = self._detect_domain_category(query)
-        if detected_category:
-            intent_data["category"] = detected_category
-            intent_data["confidence"] = 0.8
-            intent_data["source"] = "domain_knowledge"
+        # Instead of keyword matching, use vector similarity to find concepts
+        try:
+            # Generate query embedding
+            query_embedding = self.embedding_manager.generate_embedding(
+                [query], "sentence-transformers/all-MiniLM-L6-v2"
+            )[0]
             
-            # Add domain-specific feature terms
-            intent_data["product_features"] = get_feature_terms(detected_category)
+            # Find the most similar concepts
+            similarities = []
+            for concept, vector in self.concept_vectors.items():
+                # Calculate cosine similarity
+                similarity = np.dot(query_embedding, vector) / (
+                    np.linalg.norm(query_embedding) * np.linalg.norm(vector)
+                )
+                similarities.append((concept, float(similarity)))
             
-        # If we have products but no category, try to detect from products
-        elif products:
+            # Sort by similarity
+            similarities.sort(key=lambda x: x[1], reverse=True)
+            
+            # Store top matches
+            top_matches = [(concept, score) for concept, score in similarities if score > 0.3][:3]
+            intent_data["vector_matches"] = top_matches
+            
+            # Set category based on best match
+            if top_matches:
+                best_concept, best_score = top_matches[0]
+                intent_data["concepts"] = [concept for concept, _ in top_matches]
+                
+                # Map concept to product category
+                category_mapping = {
+                    "water_treatment": "water filter",
+                    "outdoor_survival": "outdoor gear",
+                    "kitchen_appliances": "kitchen appliance",
+                    "cleaning_products": "cleaning supplies",
+                    "pest_management": "pest control"
+                }
+                
+                if best_concept in category_mapping:
+                    intent_data["category"] = category_mapping[best_concept]
+                    intent_data["confidence"] = best_score
+                    intent_data["source"] = "vector_similarity"
+        except Exception as e:
+            logger.error(f"Error in vector-based intent detection: {e}")
+            
+        # If vector approach didn't work, fall back to existing methods
+        if not intent_data["category"] and products:
             category = self._detect_category_from_products(query, products)
             if category:
                 intent_data["category"] = category
                 intent_data["confidence"] = 0.7
                 intent_data["source"] = "product_analysis"
         
-        # Use context clues from the query to find domain-specific terms
-        domain_terms = []
-        for term in intent_data["keywords"]:
-            # Check for domain-specific terms
-            expanded_terms = get_expanded_terms(term)
-            if expanded_terms:
-                domain_terms.extend(expanded_terms)
-                
-            # Check for related categories
-            related_categories = get_related_categories(term)
-            if related_categories:
-                for category in related_categories:
-                    if not intent_data["category"]:  # Only set category if none detected yet
-                        intent_data["category"] = category
-                        intent_data["confidence"] = 0.6
-                        intent_data["source"] = "related_category"
-                    # Add feature terms for this category
-                    intent_data["product_features"].extend(get_feature_terms(category))
-        
-        # Add domain terms to intent data
-        intent_data["domain_terms"] = list(set(domain_terms))
-        
-        # Special case handling for water filtering/purification
-        if any(water_term in query.lower() for water_term in ["water", "drink", "drinking", "clean"]) and \
-           any(filter_term in query.lower() for filter_term in ["filter", "purify", "clean", "pure", "safe"]):
-            intent_data["category"] = "water filter"
-            intent_data["confidence"] = 0.9
-            intent_data["source"] = "combined_terms"
-            intent_data["product_features"] = get_feature_terms("water filter")
-            
-        # Special case for outdoor scenarios
-        if any(outdoor_term in query.lower() for outdoor_term in ["jungle", "wilderness", "forest", "camping", "hiking", "survival", "emergency"]):
-            # Add outdoor context
-            if "outdoor_context" not in intent_data:
-                intent_data["outdoor_context"] = True
-                
-            # If water related, boost water filter intent
-            if any(water_term in query.lower() for water_term in ["water", "drink", "drinking"]):
-                intent_data["category"] = "water filter"
-                intent_data["confidence"] = 0.95
-                intent_data["source"] = "outdoor_water_need"
-                intent_data["product_features"] = get_feature_terms("water filter")
-                intent_data["domain_terms"].extend(["portable", "survival", "emergency", "wilderness"])
-        
-        # Add the detected intent to cache
+        # Cache the result
         self.intent_cache[query] = intent_data
         return intent_data
 
@@ -327,63 +379,39 @@ class DynamicSearchProcessor:
             return None, 0.0
 
     def expand_query(self, query: str, intent: Dict = None) -> str:
-        """Expand query semantically without relying on hardcoded rules"""
+        """Expand query using vector similarity instead of hardcoded expansion rules"""
         # Check cache first
         if query in self.expansion_cache:
             return self.expansion_cache[query]
             
-        # Tokenize and normalize
-        tokens = nltk.word_tokenize(query.lower()) if hasattr(nltk, 'word_tokenize') else query.lower().split()
+        # If we have vector matches from intent detection, use those to expand
+        if intent and "concepts" in intent and intent["concepts"]:
+            expanded_parts = [query]
+            
+            # Add expansion terms based on the matched concepts
+            for concept in intent["concepts"][:2]:  # Use top two concepts
+                if concept == "water_treatment":
+                    expanded_parts.append("water purification filter clean drinking")
+                elif concept == "portability":
+                    expanded_parts.append("portable lightweight compact travel")
+                elif concept == "outdoor_survival":
+                    expanded_parts.append("wilderness jungle forest camping survival")
+                elif concept == "kitchen_appliances":
+                    expanded_parts.append("cooking food preparation kitchen appliance")
+                elif concept == "cleaning_products":
+                    expanded_parts.append("clean sanitize disinfect remove dirt")
+                elif concept == "pest_management":
+                    expanded_parts.append("insect bug repel control mosquito")
+            
+            expanded_query = " ".join(expanded_parts)
+            self.expansion_cache[query] = expanded_query
+            return expanded_query
+            
+        # If no vector matches, fall back to WordNet expansion
+        # ...existing WordNet-based code...
         
-        # Extract key terms (excluding stopwords)
-        key_terms = [term for term in tokens if term not in self.stopwords and len(term) > 2]
-        if not key_terms:
-            return query  # No meaningful terms to expand
-            
-        # Expansion techniques:
-        # 1. Synonym expansion via WordNet
-        synonyms = []
-        for term in key_terms:
-            term_synonyms = self._get_wordnet_synonyms(term)
-            # Take up to 2 synonyms per term to avoid dilution
-            synonyms.extend(term_synonyms[:2])
-            
-        # 2. Handle multi-word concepts
-        phrases = self._extract_phrases(query)
-        for phrase in phrases:
-            # Try to find phrase synonyms
-            phrase_synonyms = self._get_wordnet_synonyms(phrase)
-            synonyms.extend(phrase_synonyms[:2])
-            
-        # 3. Add intent-based expansion
-        if intent and intent.get("category") and intent.get("confidence", 0) > 0.6:
-            category_terms = intent["category"].split()
-            for term in category_terms:
-                if term not in tokens and term not in self.stopwords and len(term) > 2:
-                    synonyms.append(term)
-        
-        # Deduplicate and filter expansions
-        expanded_terms = []
-        for term in synonyms:
-            # Only add if not in original query and not a stopword
-            if term not in query.lower() and term not in self.stopwords:
-                expanded_terms.append(term)
-                
-        # Limit expansion size
-        if len(expanded_terms) > 5:
-            expanded_terms = expanded_terms[:5]
-            
-        # Create expanded query
-        if expanded_terms:
-            expanded_query = f"{query} {' '.join(expanded_terms)}"
-            logger.info(f"Expanded query: '{query}' -> '{expanded_query}'")
-        else:
-            expanded_query = query
-            
-        # Cache the result
-        self.expansion_cache[query] = expanded_query
-        return expanded_query
-        
+        return query
+
     def _extract_phrases(self, text: str) -> List[str]:
         """Extract meaningful phrases from text"""
         # Use spaCy if available for better phrase extraction

@@ -161,7 +161,7 @@ func main() {
 		searchService.Close()
 	}
 
-	// Shutdown server
+	// Shutdown server 
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Fatal("Server forced to shutdown:", err)
 	}

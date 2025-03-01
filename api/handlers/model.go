@@ -340,7 +340,7 @@ func (s *ConfigService) UpdateConfigStatus(c *gin.Context) {
 			updateErr = err
 			log.Printf("Failed to update by string ID: %v", err)
 		}
-	}
+	} 
 
 	// Try with the raw ID as string (exactly as provided)
 	if !updated {

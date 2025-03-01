@@ -14,7 +14,7 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 const ModelStatus = {
     PENDING: "pending",
     QUEUED: "queued",
-    PROCESSING: "processing",
+    PROCESSING: "processing", 
     COMPLETED: "completed",
     FAILED: "failed",
     CANCELED: "canceled"

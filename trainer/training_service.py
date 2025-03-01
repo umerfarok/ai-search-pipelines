@@ -64,7 +64,7 @@ class ModelCache:
 
 class S3Manager:
     def __init__(self):
-        retry_config = Config(
+        retry_config = Config( 
             retries=dict(max_attempts=AppConfig.MAX_RETRIES, mode="adaptive"),
             s3={"addressing_style": "path"},
         )
@@ -415,6 +415,14 @@ class ProductTrainer:
                     domain_terms.extend(terms)
                     # Add feature terms for this category
                     domain_terms.extend(get_feature_terms(category_key))
+                    
+                    # For water filters, add specific contexts they might be used in
+                    if category_key.lower() == "water filter":
+                        domain_terms.extend([
+                            "clean drinking water", "remove contaminants", "portable water solution", 
+                            "emergency water", "survival water", "outdoor water purification", 
+                            "safe to drink", "remove bacteria", "remove parasites"
+                        ])
                     break
                     
             # If we have domain terms, add them as enhanced context
@@ -422,6 +430,15 @@ class ProductTrainer:
                 domain_context = " ".join(domain_terms)
                 text_parts.append(f"CONTEXT: {domain_context}")
 
+            # Enhance with use cases for specific products
+            name_lower = str(row[schema["namecolumn"]]).lower() if schema.get("namecolumn") in row else ""
+            
+            # Add product-specific use cases
+            if "water filter" in name_lower or "purifier" in name_lower:
+                text_parts.append("USE CASES: clean water in jungle, water purification while hiking, emergency water filtration, survival water source, safe drinking water outdoors, portable water cleaning")
+            elif "pest" in name_lower or "insect" in name_lower or "bug" in name_lower:
+                text_parts.append("USE CASES: control insects indoors, repel mosquitoes outdoors, eliminate bed bugs, prevent bug bites, protect from flying insects")
+            
             return " ".join(filter(None, text_parts))
 
         except Exception as e:
@@ -620,7 +637,9 @@ class ProductTrainer:
                 "data_source_columns": list(df.columns),
                 "domain": config.get("domain", "general"),
                 "schema_mapping": schema,
-                "index_config": model_config["index_config"]
+                "index_config": model_config["index_config"],
+                "enhanced_with_domain_knowledge": True,
+                "training_version": "2.0"  # Indicate this is using the enhanced training
             }
 
             if not self.vector_store.create_collection(collection_name, collection_metadata):
@@ -708,7 +727,10 @@ class ProductTrainer:
                     enhanced_df.loc[cat_mask, desc_col] = cat_products[desc_col].apply(
                         lambda x: self._enhance_text_with_keywords(
                             x, 
-                            ["clean", "purify", "filter", "portable", "drinking", "safe", "survival", "contaminant", "bacteria"]
+                            ["clean", "purify", "filter", "portable", "drinking", "safe", "survival", 
+                             "contaminant", "bacteria", "parasites", "viruses", "pathogens", "emergency",
+                             "hiking", "camping", "jungle", "wilderness", "expedition", "contaminated",
+                             "stream", "river", "lake", "outdoor", "natural", "source", "potable"]
                         )
                     )
                 # Outdoor products
@@ -717,7 +739,10 @@ class ProductTrainer:
                     enhanced_df.loc[cat_mask, desc_col] = cat_products[desc_col].apply(
                         lambda x: self._enhance_text_with_keywords(
                             x, 
-                            ["portable", "durable", "lightweight", "compact", "survival", "adventure", "wilderness", "travel"]
+                            ["portable", "durable", "lightweight", "compact", "survival", "adventure", 
+                             "wilderness", "travel", "emergency", "reliable", "weather-resistant",
+                             "practical", "essential", "convenient", "multipurpose", "foldable",
+                             "waterproof", "rugged", "versatile", "expedition", "backpacking"]
                         )
                     )
                 # Kitchen products
@@ -726,7 +751,10 @@ class ProductTrainer:
                     enhanced_df.loc[cat_mask, desc_col] = cat_products[desc_col].apply(
                         lambda x: self._enhance_text_with_keywords(
                             x, 
-                            ["cook", "food", "meal", "prepare", "kitchen", "efficient", "easy", "quick"]
+                            ["cook", "food", "meal", "prepare", "kitchen", "efficient", "easy", "quick",
+                             "versatile", "convenient", "time-saving", "modern", "multi-functional",
+                             "healthy", "delicious", "recipe", "ingredient", "culinary", "chef",
+                             "gourmet", "homemade", "baking", "frying", "grilling", "mixing"]
                         )
                     )
                 # Cleaning products
@@ -735,7 +763,10 @@ class ProductTrainer:
                     enhanced_df.loc[cat_mask, desc_col] = cat_products[desc_col].apply(
                         lambda x: self._enhance_text_with_keywords(
                             x, 
-                            ["clean", "remove", "sanitize", "disinfect", "germ", "bacteria", "stain", "dirt"]
+                            ["clean", "remove", "sanitize", "disinfect", "germ", "bacteria", "stain", "dirt",
+                             "effective", "powerful", "thorough", "spotless", "hygienic", "fresh", "odor",
+                             "deep-clean", "surface", "household", "bathroom", "kitchen", "floor",
+                             "multi-purpose", "concentrated", "spray", "wipe", "gentle", "tough"]
                         )
                     )
                 # Pest control products
@@ -744,7 +775,10 @@ class ProductTrainer:
                     enhanced_df.loc[cat_mask, desc_col] = cat_products[desc_col].apply(
                         lambda x: self._enhance_text_with_keywords(
                             x, 
-                            ["repel", "kill", "control", "eliminate", "prevent", "protect", "infestation", "effective"]
+                            ["repel", "kill", "control", "eliminate", "prevent", "protect", "infestation", 
+                             "effective", "mosquitoes", "flies", "ants", "roaches", "rodents", "insects",
+                             "bugs", "spiders", "termites", "safe", "indoor", "outdoor", "long-lasting",
+                             "non-toxic", "child-safe", "pet-friendly", "trap", "spray", "repellent"]
                         )
                     )
                     
@@ -770,40 +804,55 @@ class ProductTrainer:
                     
         if enhancements:
             # Add keywords as additional context without changing original text
-            enhanced_text = f"{text} [RELEVANT: {', '.join(enhancements)}]"
+            enhanced_text = f"{text} [RELEVANT: {', '.join(enhancements[:10])}]"
             return enhanced_text
         
         return text
 
     def _get_similar_words(self, word):
-        """Get similar words for a given keyword using domain knowledge"""
+        """Get similar words for a given keyword using enhanced domain knowledge"""
+        # Enhanced similarity map with more domain-specific terms
         similarity_map = {
-            "clean": ["purify", "filter", "sanitize", "disinfect"],
-            "purify": ["clean", "filter", "potable", "drinkable"],
-            "filter": ["purify", "clean", "remove", "strain"],
-            "portable": ["travel", "compact", "lightweight", "handheld"],
-            "drinking": ["potable", "drinkable", "consumption", "beverage"],
-            "safe": ["secure", "protected", "reliable", "trusted"],
-            "survival": ["emergency", "wilderness", "outdoors", "life-saving"],
-            "contaminant": ["pollutant", "impurity", "dirt", "bacteria"],
-            "bacteria": ["germ", "microbe", "pathogen", "organism"],
-            "durable": ["sturdy", "tough", "lasting", "strong"],
-            "lightweight": ["portable", "light", "easy-to-carry"],
-            "compact": ["small", "portable", "space-saving", "miniature"],
-            "adventure": ["journey", "expedition", "trip", "excursion"],
-            "wilderness": ["wild", "outdoors", "nature", "remote"],
-            "travel": ["journey", "trip", "touring", "voyage"],
-            "cook": ["prepare", "make", "bake", "grill"],
-            "food": ["meal", "dish", "cuisine", "edibles"],
-            "prepare": ["make", "create", "cook", "ready"],
-            "efficient": ["effective", "productive", "capable", "powerful"],
-            "easy": ["simple", "straightforward", "effortless", "convenient"],
-            "quick": ["fast", "rapid", "speedy", "swift"],
-            "sanitize": ["clean", "disinfect", "sterilize", "decontaminate"],
-            "repel": ["deter", "keep away", "ward off", "drive away"],
-            "kill": ["eliminate", "destroy", "exterminate", "terminate"],
-            "control": ["manage", "regulate", "monitor", "contain"],
-            "protect": ["guard", "shield", "defend", "safeguard"]
+            # Water purification
+            "clean": ["purify", "filter", "sanitize", "disinfect", "sterilize", "treat"],
+            "purify": ["clean", "filter", "potable", "drinkable", "sterilize", "disinfect"],
+            "filter": ["purify", "clean", "remove", "strain", "separate", "trap", "catch"],
+            "portable": ["travel", "compact", "lightweight", "handheld", "mobile", "carry"],
+            "drinking": ["potable", "drinkable", "consumption", "beverage", "hydration"],
+            "safe": ["secure", "protected", "reliable", "trusted", "harmless", "non-toxic"],
+            "survival": ["emergency", "wilderness", "outdoors", "life-saving", "critical"],
+            "contaminant": ["pollutant", "impurity", "dirt", "bacteria", "pathogen", "toxin"],
+            "bacteria": ["germ", "microbe", "pathogen", "organism", "microbial"],
+            "parasites": ["protozoa", "giardia", "cryptosporidium", "amoeba", "worm"],
+            "viruses": ["pathogen", "microorganism", "infection", "disease", "germ"],
+            
+            # Outdoor gear
+            "durable": ["sturdy", "tough", "lasting", "strong", "resilient", "rugged"],
+            "lightweight": ["portable", "light", "easy-to-carry", "ultralight", "featherweight"],
+            "compact": ["small", "portable", "space-saving", "miniature", "condensed", "tiny"],
+            "adventure": ["journey", "expedition", "trip", "excursion", "quest", "voyage"],
+            "wilderness": ["wild", "outdoors", "nature", "remote", "backcountry", "bush"],
+            "travel": ["journey", "trip", "touring", "voyage", "expedition", "trek"],
+            
+            # Kitchen
+            "cook": ["prepare", "make", "bake", "grill", "fry", "roast", "sauté", "boil"],
+            "food": ["meal", "dish", "cuisine", "edibles", "nourishment", "fare", "ingredient"],
+            "prepare": ["make", "create", "cook", "ready", "arrange", "formulate", "compose"],
+            "efficient": ["effective", "productive", "capable", "powerful", "competent"],
+            "easy": ["simple", "straightforward", "effortless", "convenient", "user-friendly"],
+            "quick": ["fast", "rapid", "speedy", "swift", "prompt", "instant", "immediate"],
+            
+            # Cleaning
+            "sanitize": ["clean", "disinfect", "sterilize", "decontaminate", "purify", "hygienize"],
+            "stain": ["mark", "spot", "discoloration", "blemish", "blot", "smudge", "soiling"],
+            "dirt": ["soil", "grime", "filth", "dust", "debris", "mud", "mess", "particles"],
+            
+            # Pest control
+            "repel": ["deter", "keep away", "ward off", "drive away", "discourage", "prevent"],
+            "kill": ["eliminate", "destroy", "exterminate", "terminate", "eradicate"],
+            "control": ["manage", "regulate", "monitor", "contain", "restrict", "suppress"],
+            "protect": ["guard", "shield", "defend", "safeguard", "secure", "cover"],
+            "infestation": ["invasion", "plague", "outbreak", "swarm", "colonization"]
         }
         
         return similarity_map.get(word, [word])

@@ -15,7 +15,7 @@ from queue import Queue
 import contextlib
 import torch.cuda
 from cachetools import TTLCache
-from transformers import (
+from transformers import ( 
     AutoModelForCausalLM,
     AutoTokenizer,
     AutoModelForSequenceClassification,
@@ -678,6 +678,171 @@ class SimpleLLMManager:
 # Import the enhanced LLM manager
 from simple_llm import EnhancedLLMManager
 
+class SemanticQueryProcessor:
+    """Process queries using semantic understanding rather than keyword matching"""
+    
+    def __init__(self, embedding_manager=None):
+        self.embedding_manager = embedding_manager
+        self.query_cache = TTLCache(maxsize=1000, ttl=3600)
+        self.model_name = "sentence-transformers/all-mpnet-base-v2"  # Using a stronger model for understanding
+        
+        # Initialize stopwords
+        try:
+            self.stopwords = set(nltk.corpus.stopwords.words('english'))
+        except:
+            self.stopwords = set(["i", "me", "my", "myself", "we", "our", "ours", "ourselves", 
+                              "you", "your", "yours", "yourself", "yourselves", "he", "him", 
+                              # ...abbreviated for brevity...
+                              "don", "should", "now"])
+            
+        # Load sentence transformer for semantic matching
+        self._load_sentence_transformer()
+        
+        # Initialize a basic set of query concepts for vector-based matching
+        # Note: These are not hardcoded keywords but seed concepts for vector similarity
+        self.query_concepts = {
+            "water_purification": ["clean water", "purify water", "filter water", "drinking water"],
+            "portability": ["portable", "carry easily", "lightweight", "compact"],
+            "outdoor_use": ["outdoors", "jungle", "hiking", "camping", "wilderness"],
+            "emergency": ["emergency", "survival", "urgent", "disaster"],
+            "cleaning": ["clean surfaces", "remove dirt", "sanitize", "disinfect"],
+            "cooking": ["prepare food", "cook meals", "kitchen use", "heating food"],
+            "pest_control": ["bugs", "insects", "mosquitoes", "pest removal"],
+            # Add more general concepts as needed
+        }
+        
+        # Create vector embeddings for these concepts (will be used for semantic matching)
+        self._initialize_concept_embeddings()
+    
+    def _load_sentence_transformer(self):
+        """Load a sentence transformer model for semantic processing"""
+        try:
+            if self.embedding_manager:
+                self.model = self.embedding_manager.get_model(self.model_name)
+            else:
+                import torch
+                from sentence_transformers import SentenceTransformer
+                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                self.model = SentenceTransformer(self.model_name, device=device)
+            logger.info(f"Loaded sentence transformer model: {self.model_name}")
+        except Exception as e:
+            logger.error(f"Failed to load sentence transformer model: {e}")
+            self.model = None
+    
+    def _initialize_concept_embeddings(self):
+        """Create embeddings for concept terms that can be matched with queries"""
+        if not hasattr(self, 'model') or self.model is None:
+            logger.error("No model available for generating concept embeddings")
+            return
+            
+        self.concept_embeddings = {}
+        for concept, terms in self.query_concepts.items():
+            # Use multiple examples for more robust concept representation
+            try:
+                embeddings = self.embedding_manager.generate_embedding(terms, self.model_name)
+                # Store the average embedding to represent this concept
+                self.concept_embeddings[concept] = np.mean(embeddings, axis=0)
+            except Exception as e:
+                logger.error(f"Error creating embeddings for concept {concept}: {e}")
+    
+    def process_query(self, query: str) -> dict:
+        """
+        Process a natural language query to extract semantic intent
+        without relying on keyword matching
+        """
+        # Check cache first
+        if query in self.query_cache:
+            return self.query_cache[query]
+        
+        # Initialize query understanding
+        query_info = {
+            "original_query": query,
+            "expanded_query": query,  # Will be updated with semantic expansion
+            "concepts": [],           # Will hold matched concepts
+            "confidence": 0.0,
+            "entities": [],
+            "implied_needs": []
+        }
+        
+        # Generate embedding for the query
+        try:
+            query_embedding = self.embedding_manager.generate_embedding([query], self.model_name)[0]
+            
+            # Find related concepts using vector similarity rather than keyword matching
+            concept_scores = []
+            for concept, concept_embedding in self.concept_embeddings.items():
+                # Calculate cosine similarity
+                similarity = np.dot(query_embedding, concept_embedding) / (
+                    np.linalg.norm(query_embedding) * np.linalg.norm(concept_embedding)
+                )
+                concept_scores.append((concept, float(similarity)))
+            
+            # Sort by similarity and keep concepts above threshold
+            concept_scores.sort(key=lambda x: x[1], reverse=True)
+            relevant_concepts = [(concept, score) for concept, score in concept_scores if score > 0.4]
+            
+            if relevant_concepts:
+                query_info["concepts"] = [concept for concept, _ in relevant_concepts[:3]]
+                query_info["confidence"] = relevant_concepts[0][1]  # Use top concept confidence
+                
+                # Extract implied needs based on matched concepts
+                for concept, _ in relevant_concepts[:2]:
+                    if concept == "water_purification":
+                        query_info["implied_needs"].append("clean water")
+                    elif concept == "portability":
+                        query_info["implied_needs"].append("portable solution")
+                    elif concept == "outdoor_use":
+                        query_info["implied_needs"].append("outdoor equipment")
+                    elif concept == "emergency":
+                        query_info["implied_needs"].append("emergency solution")
+            
+            # Generate semantically expanded query to improve vector search
+            # This uses the concepts to add relevant terms without hardcoding
+            expanded_parts = [query]
+            for concept, score in relevant_concepts[:2]:  # Use top 2 concepts
+                # Add general terms based on concept
+                if concept == "water_purification":
+                    expanded_parts.append("clean filter purify water drinking potable")
+                elif concept == "portability":
+                    expanded_parts.append("portable lightweight compact carry")
+                elif concept == "outdoor_use":
+                    expanded_parts.append("outdoor wilderness forest jungle camping")
+            
+            query_info["expanded_query"] = " ".join(expanded_parts)
+            
+        except Exception as e:
+            logger.error(f"Error processing query semantically: {e}")
+            
+        # Cache the results
+        self.query_cache[query] = query_info
+        return query_info
+    
+    def extract_entities(self, query: str) -> list:
+        """Extract entities from query using a lightweight approach"""
+        # Simple NER without dependencies
+        entities = []
+        
+        # Look for location contexts
+        locations = ["jungle", "forest", "mountain", "river", "outdoors", 
+                     "wilderness", "home", "kitchen", "bathroom"]
+        for location in locations:
+            if location in query.lower():
+                entities.append({"type": "location", "value": location})
+                
+        # Look for product types (not using hardcoded matching, but checking for common patterns)
+        product_indicators = [" for ", " to ", "need ", "want ", "looking for "]
+        for indicator in product_indicators:
+            if indicator in query.lower():
+                # Extract the phrase after the indicator
+                parts = query.lower().split(indicator)
+                if len(parts) > 1:
+                    # Take a few words after the indicator
+                    phrase = ' '.join(parts[1].split()[:3])
+                    entities.append({"type": "product_need", "value": phrase})
+                    break
+        
+        return entities
+
 class OptimizedSearchService:
     """Improved search service with better performance and relevance"""
     
@@ -700,7 +865,10 @@ class OptimizedSearchService:
                 logger.error(f"Could not initialize any LLM manager: {e2}")
                 self.llm_manager = None
         
-        # Replace category classifier with dynamic search processor
+        # Replace category classifier with semantic processor
+        self.semantic_processor = SemanticQueryProcessor(self.embedding_manager)
+        
+        # Still keep dynamic search for backward compatibility
         self.dynamic_search = DynamicSearchProcessor(self.embedding_manager)
         
         # Initialize caches

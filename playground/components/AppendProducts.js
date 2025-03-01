@@ -14,10 +14,10 @@ const TabButton = ({ active, onClick, icon: Icon, children }) => (
                 ? 'bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-400 font-medium' 
                 : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
         }`}
-    >
+    > 
         <Icon className="w-4 h-4 mr-2" />
         {children}
-    </button>
+    </button> 
 );
 
 const CSVDropzone = ({ onCSVParse, expectedHeaders }) => {

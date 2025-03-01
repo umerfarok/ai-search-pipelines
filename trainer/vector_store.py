@@ -254,20 +254,19 @@ class VectorStore:
     
     def search(self, query_vector: List[float] = None, collection_name: str = None, 
                top_k: int = 10, limit: int = 10, threshold: float = 0.0, 
-               filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+               filters: Optional[Dict[str, Any]] = None,
+               query_text: str = None) -> List[Dict[str, Any]]:
         """
-        Search vectors similar to the query vector with updated parameter handling.
+        Enhanced search with semantic understanding capabilities
         
         Args:
             query_vector: Vector to search for
-            collection_name: Name of collection to search in (overrides self.collection_name)
+            collection_name: Name of collection to search in
             top_k: Number of results to return (alias for limit)
             limit: Number of results to return
             threshold: Minimum similarity score
             filters: Filtering conditions
-            
-        Returns:
-            List of search results with metadata
+            query_text: Original query text for hybrid retrieval
         """
         try:
             # Handle collection name properly
@@ -348,7 +347,37 @@ class VectorStore:
                             "metadata": search_results["metadatas"][0][i]
                         })
             
+            # Enhanced results with semantic understanding if query_text is provided
+            if query_text and len(results) > 1:
+                # Extract key terms from query
+                import re
+                from collections import Counter
+                
+                # Simple tokenization
+                query_terms = re.findall(r'\b\w+\b', query_text.lower())
+                query_term_counts = Counter(query_terms)
+                
+                # Boost scores for results that match query terms in name or description
+                for result in results:
+                    original_score = result.get('score', 0)
+                    metadata = result.get('metadata', {})
+                    text = f"{metadata.get('name', '')} {metadata.get('description', '')}"
+                    text_lower = text.lower()
+                    
+                    # Count matching terms
+                    term_matches = 0
+                    for term, count in query_term_counts.items():
+                        if len(term) > 3:  # Only consider meaningful terms
+                            term_matches += text_lower.count(term) * count
+                    
+                    # Boost score based on term matches (with diminishing returns)
+                    if term_matches > 0:
+                        boost = min(0.2, 0.02 * term_matches)  # Cap at 0.2 boost
+                        result['score'] = min(1.0, original_score + boost)
+                        result['hybrid_scoring'] = True
+            
             return results
+            
         except Exception as e:
             logger.error(f"Error searching vectors: {e}")
             return []
@@ -405,7 +434,7 @@ class VectorStore:
                 except Exception as e:
                     logger.error(f"Error getting collection info: {e}")
                     info["error"] = str(e)
-            
+             
             # Handle ChromaDB
             elif hasattr(AppConfig, 'VECTOR_DB_HOST') and AppConfig.VECTOR_DB_HOST:
                 client = self._get_chroma_client()
@@ -584,3 +613,4 @@ def create_vector_store(config: dict, documents: list) -> None:
     except Exception as e:
         logger.error(f"Error creating vector store: {e}")
         return False
+

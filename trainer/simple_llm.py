@@ -13,7 +13,7 @@ from typing import List, Dict, Optional
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
 logger = logging.getLogger(__name__)
-
+ 
 class EnhancedLLMManager:
     """Enhanced LLM manager with better response generation and fallback options"""
      
@@ -26,17 +26,12 @@ class EnhancedLLMManager:
         self.initialized = False
         self._initialize_model()
         
-        # Response templates for fallback
+        # Replace templates with more flexible concept-based templates
         self.templates = {
-            "water_filter": [
-                "Based on your search for water filtration in the {context}, I recommend the {product}. This {category} product is designed to effectively clean and purify water, making it safe for drinking.",
-                "For your need to clean water in a {context} environment, the {product} would work well. It's designed to remove contaminants and provide clean drinking water.",
-                "If you need to clean water while in the {context}, the {product} is a good choice. It's effective at filtering out impurities and making water potable."
-            ],
             "general": [
-                "Based on your search, I recommend the {product}. This {category} product should meet your needs for {query_intent}.",
-                "The {product} appears to be the best match for your requirements. This {category} item is well-suited for {query_intent}.",
-                "For your needs, I'd suggest the {product}. It's a popular choice in the {category} category for {query_intent}."
+                "Based on your need for {concept}, I recommend the {product}. This {category} product is designed to {function}, making it suitable for your requirements.",
+                "For your {concept} needs, the {product} would be a good choice. It's a {category} product that offers {benefit}.",
+                "The {product} would meet your needs for {concept}. This {category} product provides {benefit} which addresses your requirements."
             ]
         }
 
@@ -151,33 +146,62 @@ class EnhancedLLMManager:
         
         return text.strip()
         
-    def get_template_response(self, query: str, product: Dict, context: str = None) -> str:
-        """Generate a template-based response when model generation fails"""
+    def get_template_response(self, query: str, product: Dict, concepts: List[str] = None) -> str:
+        """Generate a template-based response using concepts rather than hardcoded categories"""
         import random
         
-        # Determine the template to use
-        template_key = "water_filter" if "water" in query.lower() else "general"
-        templates = self.templates[template_key]
+        # Get a general template
+        template = random.choice(self.templates["general"])
         
-        # Fill in template
-        template = random.choice(templates)
+        # Determine concept to use
+        concept = "products"  # Default
+        function = "meet your needs"
+        benefit = "quality features"
+        
+        # Extract concepts from query if not provided
+        if not concepts:
+            concepts = []
+            if "water" in query.lower() and any(term in query.lower() for term in ["clean", "purify", "filter", "drink"]):
+                concepts.append("water purification")
+            elif "portable" in query.lower() or "carry" in query.lower():
+                concepts.append("portable solutions")
+            elif any(term in query.lower() for term in ["jungle", "forest", "wilderness", "outdoor"]):
+                concepts.append("outdoor equipment")
+            elif any(term in query.lower() for term in ["kitchen", "cook", "food"]):
+                concepts.append("kitchen tools")
+        
+        # Use the first concept
+        if concepts:
+            concept = concepts[0]
+            
+            # Map concept to function and benefit
+            if concept == "water purification":
+                function = "clean and purify water efficiently"
+                benefit = "safe drinking water wherever you need it"
+            elif concept == "outdoor equipment":
+                function = "help you in outdoor environments"
+                benefit = "reliability in wilderness conditions"
+            elif concept == "portable solutions":
+                function = "be easily carried and transported"
+                benefit = "convenience while traveling"
+            elif concept == "kitchen tools":
+                function = "help prepare meals efficiently"
+                benefit = "convenient food preparation"
         
         if product:
             product_name = product.get('name', '').split('|')[0].strip()
             category = product.get('category', 'recommended')
         else:
-            product_name = "recommended water filter"
-            category = "water filtration"
+            product_name = "recommended product"
+            category = "featured"
             
-        query_intent = "cleaning water" if "water" in query.lower() else query.lower()
-        context_value = context or "outdoor"
-        
-        # Format the template
+        # Format the template with the extracted information
         response = template.format(
             product=product_name,
             category=category,
-            query_intent=query_intent,
-            context=context_value
+            concept=concept,
+            function=function,
+            benefit=benefit
         )
         
         return response
